@@ -1,25 +1,26 @@
 // Заменяет preload.js/contextBridge из Electron-версии: собирает тот же
-// объект window.zapret, но поверх Tauri invoke()/event API. renderer.js не
-// тронут и продолжает звать window.zapret.* как раньше.
+// объект window.zapret, но поверх Tauri invoke()/event API. renderer.js
+// продолжает звать window.zapret.* как раньше.
 //
-// Всё, что помечено NOT_PORTED, честно отвечает { ok:false } — экран из-за
-// этого не падает, но действие говорит, что его ещё нет.
+// Заглушек здесь больше нет: каждый метод ведёт в настоящую команду Rust.
 (function () {
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
   const { open, save } = window.__TAURI__.dialog;
   const { getCurrentWindow } = window.__TAURI__.window;
-
-  const NOT_PORTED = (name) => async (..._args) => ({
-    ok: false,
-    error: `«${name}» ещё не перенесено с Electron на Tauri`,
-  });
-  const noSub = () => () => {};
+  const { getCurrentWebview } = window.__TAURI__.webview;
 
   window.zapret = {
-    // ---- перенесено по-настоящему ----
-    getPathForFile: (file) => file.path || file.name,
     copyText: (text) => invoke('copy_text', { text }),
+
+    // Перетаскивание идёт не через DOM: WebView2 не даёт настоящий путь
+    // (File.path — свойство Electron, здесь его нет), а Tauri перехватывает
+    // drop сам и оставляет dataTransfer.files пустым. Настоящие пути
+    // приходят только этим событием.
+    onFileDrop: (cb) => {
+      const un = getCurrentWebview().onDragDropEvent((e) => cb(e.payload));
+      return () => un.then((f) => f());
+    },
 
     pickFolder: async () => {
       const dir = await open({ directory: true, multiple: false });
@@ -57,7 +58,6 @@
       return () => un.then((f) => f());
     },
 
-    // ---- НЕ ПЕРЕНЕСЕНО (заглушки — см. main.js в старом проекте) ----
     listReleases: () => invoke('list_releases'),
     deleteRelease: (folderName) => invoke('delete_release', { folderName }),
     getLatestReleaseInfo: () => invoke('get_latest_release_info'),

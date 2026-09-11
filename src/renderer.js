@@ -2007,20 +2007,26 @@ window.zapret.onAutoSwitched(({ from, to }) => {
 
 const autoTestToggle = $('autoTestToggle');
 const autoTestIntervalSeg = $('autoTestIntervalSeg');
+const autoTestModeSeg = $('autoTestModeSeg');
 
 async function loadAutoTestSchedule() {
   const s = await window.zapret.getAutoTestSchedule();
   autoTestToggle.classList.toggle('on', !!s.enabled);
   autoTestIntervalSeg.querySelectorAll('.seg-btn').forEach((b) =>
-    b.classList.toggle('active', Number(b.dataset.days) === s.intervalDays)
+    b.classList.toggle('active', Number(b.dataset.days) === s.days)
+  );
+  autoTestModeSeg.querySelectorAll('.seg-btn').forEach((b) =>
+    b.classList.toggle('active', b.dataset.mode === (s.mode || 'standard'))
   );
 }
 
 async function saveAutoTestSchedule() {
   const active = autoTestIntervalSeg.querySelector('.seg-btn.active');
+  const mode = autoTestModeSeg.querySelector('.seg-btn.active');
   await window.zapret.setAutoTestSchedule({
     enabled: autoTestToggle.classList.contains('on'),
-    intervalDays: Number(active ? active.dataset.days : 7),
+    days: Number(active ? active.dataset.days : 7),
+    mode: mode ? mode.dataset.mode : 'standard',
   });
 }
 
@@ -2030,11 +2036,13 @@ autoTestToggle.onclick = async () => {
   showToast(on ? 'Автопрогон тестов включён' : 'Автопрогон тестов выключен', 'success');
 };
 
-autoTestIntervalSeg.querySelectorAll('.seg-btn').forEach((b) => {
-  b.onclick = () => {
-    autoTestIntervalSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
-    saveAutoTestSchedule();
-  };
+[autoTestIntervalSeg, autoTestModeSeg].forEach((seg) => {
+  seg.querySelectorAll('.seg-btn').forEach((b) => {
+    b.onclick = () => {
+      seg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+      saveAutoTestSchedule();
+    };
+  });
 });
 
 // ─────────── Настройки: уведомления ───────────
@@ -2327,13 +2335,13 @@ $('tgwsproxyLogsBtn').onclick = async () => {
 
 $('exportSettingsBtn').onclick = async () => {
   const res = await window.zapret.exportSettings();
-  if (res.canceled) return;
+  if (res.cancelled) return;
   showToast(res.ok ? 'Настройки сохранены' : res.error || 'Не удалось экспортировать', res.ok ? 'success' : 'error');
 };
 
 $('importSettingsBtn').onclick = async () => {
   const res = await window.zapret.importSettings();
-  if (res.canceled) return;
+  if (res.cancelled) return;
   if (!res.ok) {
     showToast(res.error || 'Не удалось импортировать', 'error');
     return;
@@ -2362,8 +2370,27 @@ async function loadToggles() {
 
 gameFilterSeg.querySelectorAll('.seg-btn').forEach((b) => {
   b.onclick = async () => {
+    const prev = gameFilterSeg.querySelector('.seg-btn.active');
+    if (prev === b) return;
     gameFilterSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
-    await window.zapret.setGameFilter(b.dataset.gf);
+
+    const res = await window.zapret.setGameFilter(b.dataset.gf);
+    if (!res.ok) {
+      // Запись в папку релиза могла не пройти — не оставляем сегмент
+      // показывать режим, которого на диске нет.
+      gameFilterSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === prev));
+      showToast(res.error || 'Не удалось сменить фильтр игр', 'error');
+      return;
+    }
+
+    // game_filter.enabled читается только в момент запуска winws.exe, так что
+    // без перезапуска стратегии переключатель ничего бы не изменил.
+    if (currentState.running && currentState.activeConfig) {
+      const ok = await applyConfig(currentState.activeConfig, currentState.installedAsService, true);
+      showToast(ok ? 'Фильтр игр применён, стратегия перезапущена' : 'Фильтр сохранён, но перезапустить стратегию не вышло', ok ? 'success' : 'warn');
+    } else {
+      showToast('Фильтр игр сохранён — применится при запуске стратегии', 'success');
+    }
   };
 });
 
@@ -2375,7 +2402,11 @@ $('ipsetModeBtn').onclick = async () => {
 
 autoUpdateToggle.onclick = async () => {
   const on = autoUpdateToggle.classList.toggle('on');
-  await window.zapret.setAutoUpdate(on);
+  const res = await window.zapret.setAutoUpdate(on);
+  if (!res.ok) {
+    autoUpdateToggle.classList.toggle('on', !on);
+    showToast(res.error || 'Не удалось изменить автопроверку обновлений', 'error');
+  }
 };
 
 // ─────────── Настройки: свои списки ───────────
@@ -2441,13 +2472,19 @@ $('checkUpdatesBtn').onclick = async () => {
     line.textContent = `Ошибка: ${res.error}`;
     return;
   }
-  if (res.upToDate) {
+  // Не res.upToDate: там простое равенство строк, из-за которого 1.9.10
+  // считалась «не последней» рядом с 1.9.9, а сборка новее опубликованной —
+  // устаревшей. Сравниваем по частям тем же cmpVer, что и «О программе».
+  const outdated = cmpVer(res.remote, res.local) > 0;
+  $('engineUpdateDot').classList.toggle('hidden', !outdated);
+  $('engineUpdateLabel').textContent = outdated ? `Есть ${res.remote}` : 'Проверить обновление';
+  if (!outdated) {
     line.textContent = `Установлена последняя версия: ${res.local}`;
     return;
   }
 
   line.textContent = `Доступна новая версия ${res.remote} (у тебя ${res.local}).`;
-  notesBody.textContent = res.notes || 'Список изменений недоступен — смотри на GitHub.';
+  notesBody.textContent = 'Список изменений — на странице релиза.';
   notesBtn.dataset.url = res.releaseUrl;
   notesBox.classList.remove('hidden');
 };
@@ -2629,21 +2666,25 @@ async function loadReleaseList() {
     return;
   }
 
+  // Поля именно такие, какие отдаёт releases.rs::ReleaseEntry:
+  // name / path / current / extractedAt. Раньше здесь читались version,
+  // folderName, active и root — их не существует, и каждая строка списка
+  // выводила «undefined», а кнопки уезжали в бэкенд с этой же строкой.
   box.innerHTML = res.releases
     .map((r) => {
       const date = r.extractedAt ? new Date(r.extractedAt).toLocaleDateString('ru-RU') : '—';
-      return `<div class="release-row ${r.active ? 'active' : ''}">
+      return `<div class="release-row ${r.current ? 'active' : ''}">
         <div class="release-main">
-          <span class="release-ver">${esc(r.version || r.folderName)}</span>
+          <span class="release-ver">${esc(r.name)}</span>
           <span class="release-date">${date}</span>
-          ${r.active ? '<span class="release-active-badge">активен</span>' : ''}
+          ${r.current ? '<span class="release-active-badge">активен</span>' : ''}
         </div>
         <div class="release-actions">
           ${
-            r.active
+            r.current
               ? ''
-              : `<button class="btn ghost xs" data-switch="${esc(r.folderName)}">Переключиться</button>
-                 <button class="btn ghost xs" data-delete="${esc(r.folderName)}">Удалить</button>`
+              : `<button class="btn ghost xs" data-switch="${esc(r.name)}">Переключиться</button>
+                 <button class="btn ghost xs" data-delete="${esc(r.name)}">Удалить</button>`
           }
         </div>
       </div>`;
@@ -2652,8 +2693,8 @@ async function loadReleaseList() {
 
   box.querySelectorAll('[data-switch]').forEach((btn) => {
     btn.onclick = () => {
-      const rel = res.releases.find((r) => r.folderName === btn.dataset.switch);
-      if (rel) switchToRelease(rel.root);
+      const rel = res.releases.find((r) => r.name === btn.dataset.switch);
+      if (rel) switchToRelease(rel.path);
     };
   });
   box.querySelectorAll('[data-delete]').forEach((btn) => {
@@ -3148,33 +3189,20 @@ $('pickArchiveBtn').onclick = async () => {
   if (p) loadFromPath(p);
 };
 
-['dragenter', 'dragover'].forEach((evt) =>
-  window.addEventListener(evt, (e) => {
-    e.preventDefault();
+// Перетаскивание обслуживает Tauri, а не DOM: события dragover/drop до
+// страницы не доходят, а File.path — свойство Electron, которого в WebView2
+// нет. Отсюда приходят настоящие пути на диске.
+window.zapret.onFileDrop((e) => {
+  if (e.type === 'enter' || e.type === 'over') {
     if (!dropZone.classList.contains('hidden')) dropZone.classList.add('drag-over');
-  })
-);
-['dragleave', 'drop'].forEach((evt) =>
-  window.addEventListener(evt, (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-over');
-  })
-);
-window.addEventListener('drop', (e) => {
-  const file = e.dataTransfer.files && e.dataTransfer.files[0];
-  if (!file) {
-    showToast('Не увидела файл в перетаскивании', 'error');
     return;
   }
-  let p = null;
-  try {
-    p = window.zapret.getPathForFile(file);
-  } catch (err) {
-    showToast('Не удалось определить путь: ' + (err && err.message ? err.message : err), 'error');
-    return;
-  }
+  dropZone.classList.remove('drag-over');
+  if (e.type !== 'drop') return;
+
+  const p = (e.paths || [])[0];
   if (!p) {
-    showToast('Путь к файлу пуст — не могу его загрузить', 'error');
+    showToast('Не увидела файл в перетаскивании', 'error');
     return;
   }
   loadFromPath(p);
@@ -3187,15 +3215,17 @@ loadOverview();
 
 (async () => {
   await refreshState();
-  const ob = await window.zapret.getOnboardingDone();
+  // Команда отдаёт голый bool, а не { done } — иначе мастер показывался бы
+  // при каждом запуске, потому что у булева нет свойства done.
+  const onboardingDone = await window.zapret.getOnboardingDone();
 
   if (currentState.rootPath) {
     await afterReleaseLoaded();
     // Edge case: onboarding somehow not done but a release already exists
     // (e.g. state was reset by hand) — the pre-release wizard doesn't apply
     // any more, fall back to the plain informational tour offer instead.
-    if (!ob.done) $('onboardTourOverlay').classList.remove('hidden');
-  } else if (!ob.done) {
+    if (!onboardingDone) $('onboardTourOverlay').classList.remove('hidden');
+  } else if (!onboardingDone) {
     showWizardChoice();
   }
 })();

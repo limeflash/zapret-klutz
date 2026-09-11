@@ -195,6 +195,16 @@ pub struct ReleaseEntry {
     pub name: String,
     pub path: String,
     pub current: bool,
+    /// Когда папку распаковали — мс от эпохи, как ждёт `new Date(...)`.
+    /// None, если файловая система не отдала время.
+    #[serde(rename = "extractedAt")]
+    pub extracted_at: Option<u64>,
+}
+
+fn dir_created_ms(entry: &fs::DirEntry) -> Option<u64> {
+    let meta = entry.metadata().ok()?;
+    let t = meta.created().or_else(|_| meta.modified()).ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
 pub fn list_releases(app: &AppHandle, current_root: Option<&str>) -> Vec<ReleaseEntry> {
@@ -209,6 +219,7 @@ pub fn list_releases(app: &AppHandle, current_root: Option<&str>) -> Vec<Release
                     ReleaseEntry {
                         name: e.file_name().to_string_lossy().to_string(),
                         current: current_root == Some(p.as_str()),
+                        extracted_at: dir_created_ms(&e),
                         path: p,
                     }
                 })
@@ -218,7 +229,14 @@ pub fn list_releases(app: &AppHandle, current_root: Option<&str>) -> Vec<Release
 }
 
 pub fn delete_release(app: &AppHandle, folder: &str) -> Result<(), String> {
-    if folder.contains("..") || folder.contains('/') || folder.contains('\\') {
+    // Двоеточие тоже: `Path::join("C:Users")` в Windows отбрасывает базовый
+    // путь, и remove_dir_all ушёл бы гулять за пределы каталога релизов.
+    if folder.is_empty()
+        || folder.contains("..")
+        || folder.contains('/')
+        || folder.contains('\\')
+        || folder.contains(':')
+    {
         return Err("Недопустимое имя папки.".into());
     }
     let p = releases_dir(app).join(folder);
