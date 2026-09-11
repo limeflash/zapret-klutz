@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Klutz</title>
+<!--
+  Меню трея. Системное меню Win32 выглядит как из 2000-х и не умеет ни
+  тему, ни тумблеры — поэтому это отдельное маленькое прозрачное окно в
+  стиле приложения. Rust ставит его над иконкой трея и прячет при потере
+  фокуса (tray.rs).
+-->
+<style>
+  :root {
+    --raised: #ffffff;
+    --line: #e6e6e3;
+    --line-row: #efefec;
+    --line-input: #e2e2df;
+    --tx: #111113;
+    --tx-2: #4a4a48;
+    --tx-3: #6b6b67;
+    --tx-4: #8a8a86;
+    --tx-6: #b6b6b2;
+    --green: #0f9e5a;
+    --green-bg: #eaf6f0;
+    --amber: #d98a00;
+    --red: #c23b3b;
+    --red-row: #d64545;
+    --pill: #f4f4f2;
+    --knob: #ffffff;
+    --shadow: 0 18px 40px -16px rgba(0,0,0,.32), 0 2px 8px rgba(0,0,0,.06);
+  }
+  html[data-theme="dark"] {
+    --raised: #1c1c20;
+    --line: #2f2f35;
+    --line-row: #26262b;
+    --line-input: #3a3a41;
+    --tx: #f4f4f2;
+    --tx-2: #d2d2ce;
+    --tx-3: #aeaea9;
+    --tx-4: #8c8c90;
+    --tx-6: #5e5e65;
+    --green: #2fbf7a;
+    --green-bg: #1f3329;
+    --amber: #e0a33a;
+    --red: #f08a8d;
+    --red-row: #f08a8d;
+    --pill: #28282e;
+    --knob: #f7f7f5;
+    --shadow: 0 18px 40px -16px rgba(0,0,0,.8), 0 2px 8px rgba(0,0,0,.3);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    background: transparent;
+    overflow: hidden;
+    color: var(--tx);
+    font-family: 'Manrope', 'Segoe UI', system-ui, sans-serif;
+    font-size: 13.5px;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    cursor: default;
+  }
+
+  /* Поля вокруг карточки — место под тень: окно прозрачное. */
+  .wrap { width: 300px; padding: 10px; }
+  .card {
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    animation: pop .13s ease-out;
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(6px) scale(.985); }
+    to { opacity: 1; transform: none; }
+  }
+
+  .head { display: flex; align-items: center; gap: 11px; padding: 14px 14px 12px; }
+  .logo { width: 26px; height: 26px; flex: 0 0 auto; }
+  .logo-dark { display: none; }
+  html[data-theme="dark"] .logo-light { display: none; }
+  html[data-theme="dark"] .logo-dark { display: block; }
+  .head-text { min-width: 0; flex: 1; }
+  .state {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 11px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--tx-4);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tx-6); flex: 0 0 auto; }
+  .ok .state { color: var(--green); }
+  .ok .dot { background: var(--green); box-shadow: 0 0 0 3px var(--green-bg); }
+  .warn .state { color: var(--amber); }
+  .warn .dot { background: var(--amber); }
+  .bad .state { color: var(--red-row); }
+  .bad .dot { background: var(--red-row); }
+  .name {
+    margin-top: 3px; font-size: 15px; font-weight: 700; letter-spacing: -.01em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .targets { padding: 0 14px 10px; display: grid; gap: 2px; }
+  .t { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; color: var(--tx-3); }
+  .t span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t .v { flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--tx-4); }
+  .t.fail, .t.fail .v { color: var(--red-row); }
+
+  .sep { height: 1px; background: var(--line-row); }
+  .items { padding: 5px; }
+  .item {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; padding: 8px 10px;
+    border: 0; border-radius: 8px; background: transparent;
+    font: inherit; color: var(--tx); text-align: left; cursor: default;
+  }
+  .item:hover:not(:disabled) { background: var(--pill); }
+  .item:disabled { color: var(--tx-6); }
+  .item:disabled svg { color: var(--tx-6); }
+  .item svg { width: 16px; height: 16px; flex: 0 0 auto; color: var(--tx-4); }
+  .item .chev { width: 14px; height: 14px; margin-left: auto; transition: transform .15s; }
+  .item.open .chev { transform: rotate(90deg); }
+  .item.danger, .item.danger svg { color: var(--red); }
+  .sub { padding: 0 0 3px 24px; }
+  .sub .item { padding: 6px 10px; font-size: 13px; color: var(--tx-2); }
+  .sub .item span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .toggle {
+    margin-left: auto; width: 32px; height: 18px; flex: 0 0 auto;
+    border-radius: 999px; background: var(--line-input); position: relative;
+    transition: background .15s;
+  }
+  .toggle::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--knob); box-shadow: 0 1px 2px rgba(0,0,0,.25);
+    transition: transform .15s;
+  }
+  .toggle.on { background: var(--green); }
+  .toggle.on::after { transform: translateX(14px); }
+</style>
+</head>
+<body>
+<div class="wrap"><div class="card" id="card"></div></div>
+
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+
+  const esc = (s) =>
+    String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  const I = (d) =>
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+  const ICONS = {
+    open: I('<rect x="2" y="3" width="12" height="10" rx="2"/><path d="M2 6h12"/>'),
+    stop: I('<rect x="4" y="4" width="8" height="8" rx="1.6"/>'),
+    switch: I('<path d="M3 5h9l-2.5-2.5M13 11H4l2.5 2.5"/>'),
+    tg: I('<path d="M14 2.5 1.8 7.2l4.4 1.6L12 4.6 7.6 9.6v3.9l2.3-2.6 2.9 2.1z"/>'),
+    quit: I('<path d="M8 2v5.5"/><path d="M4.4 4.6a5 5 0 1 0 7.2 0"/>'),
+  };
+  const CHEV = '<svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>';
+
+  // Тема — та же, что выбрана в приложении (общий localStorage); как и
+  // там, без сохранённого выбора — светлая.
+  function applyTheme() {
+    let t = null;
+    try { t = localStorage.getItem('zapretTheme'); } catch {}
+    document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light';
+  }
+
+  const STATE_LABEL = {
+    ok: 'Zapret работает',
+    warn: 'Работает с ошибками',
+    bad: 'Цели не отвечают',
+    idle: 'Обход выключен',
+  };
+
+  let state = null;
+  let switchOpen = false;
+
+  function render() {
+    const s = state;
+    const targets = s.running && s.targets.length
+      ? `<div class="targets">${s.targets
+          .map((t) => `<div class="t ${t.ok ? '' : 'fail'}"><span>${esc(t.name)}</span><span class="v">${t.ok ? t.ms + ' мс' : 'нет ответа'}</span></div>`)
+          .join('')}</div>`
+      : '';
+
+    const sw = s.switchTo.length
+      ? `<button class="item ${switchOpen ? 'open' : ''}" data-act="switch-toggle">${ICONS.switch}<span>Переключить на</span>${CHEV}</button>` +
+        (switchOpen
+          ? `<div class="sub">${s.switchTo
+              .map((c) => `<button class="item" data-act="switch:${esc(c.file)}"><span>${esc(c.name)}</span></button>`)
+              .join('')}</div>`
+          : '')
+      : '';
+
+    document.getElementById('card').innerHTML = `
+      <div class="head ${s.state}">
+        <img class="logo logo-light" src="assets/logo-for-light-64.png" alt="">
+        <img class="logo logo-dark" src="assets/logo-for-dark-64.png" alt="">
+        <div class="head-text">
+          <div class="state"><span class="dot"></span>${STATE_LABEL[s.state] || ''}</div>
+          <div class="name">${esc(s.running ? s.active || 'Вариант не выбран' : 'Klutz')}</div>
+        </div>
+      </div>
+      ${targets}
+      <div class="sep"></div>
+      <div class="items">
+        <button class="item" data-act="open">${ICONS.open}<span>Открыть Klutz</span></button>
+        <button class="item" data-act="stop" ${s.running ? '' : 'disabled'}>${ICONS.stop}<span>Остановить обход</span></button>
+        ${sw}
+      </div>
+      <div class="sep"></div>
+      <div class="items">
+        <button class="item" data-act="tg">${ICONS.tg}<span>Telegram-прокси</span><span class="toggle ${s.tgRunning ? 'on' : ''}"></span></button>
+      </div>
+      <div class="sep"></div>
+      <div class="items">
+        <button class="item danger" data-act="quit">${ICONS.quit}<span>Выйти из Klutz</span></button>
+      </div>`;
+  }
+
+  // Размер окна подгоняется под содержимое — Rust ставит окно над треем
+  // уже нужного размера, без мигания.
+  async function reportSize() {
+    await new Promise((r) => requestAnimationFrame(() => r()));
+    const r = document.querySelector('.wrap').getBoundingClientRect();
+    await invoke('tray_menu_ready', { width: Math.ceil(r.width), height: Math.ceil(r.height) });
+  }
+
+  async function refresh(reset) {
+    applyTheme();
+    if (reset) switchOpen = false;
+    state = await invoke('tray_menu_state');
+    render();
+    await reportSize();
+  }
+
+  document.getElementById('card').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || btn.disabled) return;
+    const act = btn.dataset.act;
+    if (act === 'switch-toggle') {
+      switchOpen = !switchOpen;
+      render();
+      await reportSize();
+      return;
+    }
+    if (act === 'tg') {
+      // Тумблер переключается сразу, меню не закрываем — видно результат.
+      state.tgRunning = !state.tgRunning;
+      render();
+    }
+    await invoke('tray_menu_action', { id: act });
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') invoke('tray_menu_hide');
+  });
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  listen('tray-menu-open', () => refresh(true));
+  listen('tray-menu-update', () => refresh(false));
+  refresh(true);
+</script>
+</body>
+</html>

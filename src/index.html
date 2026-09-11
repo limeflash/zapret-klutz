@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Klutz</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ══════════ Кастомный титулбар (38px) ══════════ -->
+<header class="titlebar">
+  <div class="tb-brand">
+    <span class="tb-dot" id="tbDot"></span>
+    <span>Klutz</span>
+    <span class="tb-version" id="tbVersion">1.0.0</span>
+  </div>
+  <div class="tb-controls">
+    <button class="tb-btn" id="winMinBtn" title="Свернуть" aria-label="Свернуть">
+      <span class="tb-glyph-min"></span>
+    </button>
+    <button class="tb-btn" id="winMaxBtn" title="Развернуть" aria-label="Развернуть">
+      <span class="tb-glyph-max"></span>
+    </button>
+    <button class="tb-btn tb-close" id="winCloseBtn" title="Свернуть в трей" aria-label="Закрыть">✕</button>
+  </div>
+</header>
+
+<div id="toastContainer" class="toast-container"></div>
+
+<div id="confirmOverlay" class="modal-overlay hidden">
+  <div class="modal-card">
+    <p id="confirmMessage"></p>
+    <div class="modal-actions">
+      <button id="confirmCancelBtn" class="btn ghost">Отмена</button>
+      <button id="confirmOkBtn" class="btn danger">Да</button>
+    </div>
+  </div>
+</div>
+
+<!-- Командная палитра: добавить игру, сервис или свой адрес -->
+<!-- О программе -->
+<div id="aboutOverlay" class="modal-overlay hidden">
+  <div class="about-card">
+    <div class="about-head">
+      <img class="logo-light" src="assets/logo-for-light-128.png" alt="" />
+      <img class="logo-dark" src="assets/logo-for-dark-128.png" alt="" />
+      <div class="about-name">Klutz <span id="aboutAppVersion">1.0.0</span></div>
+      <div class="about-desc">
+        Графическая оболочка для обхода блокировок Discord, YouTube и игровых сервисов.
+        Работает на официальных стратегиях zapret, ничего не отправляет и не собирает.
+      </div>
+    </div>
+    <div class="about-rows">
+      <div class="about-row"><span>zapret-discord-youtube</span><span id="aboutZapretVer">не загружен</span></div>
+      <div class="about-row"><span>TgWsProxy</span><span id="aboutTgwsVer">—</span></div>
+      <div class="about-row"><span>Разработка</span><span>Klutz team</span></div>
+      <div class="about-row"><span>Лицензия</span><span>MIT · открытый код</span></div>
+    </div>
+    <div class="about-note hidden" id="aboutUpdateNote"></div>
+    <p class="about-thanks">
+      Klutz — оболочка над <b>zapret-discord-youtube</b> и <b>tg-ws-proxy</b>.
+      Огромное спасибо <b>Flowseal</b> за оба проекта — без них здесь нечего было бы запускать.
+    </p>
+    <div class="about-actions">
+      <button class="btn ghost" id="aboutGithubBtn">GitHub</button>
+      <button class="btn ghost" id="aboutReportBtn">Сообщить о проблеме</button>
+      <button class="btn primary" id="aboutUpdateBtn">Проверить обновления</button>
+    </div>
+  </div>
+</div>
+
+<div id="cmdOverlay" class="cmd-overlay hidden">
+  <div class="cmd-card">
+    <div class="cmd-input-row">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.6"/><line x1="10.4" y1="10.4" x2="14" y2="14"/></svg>
+      <input id="cmdInput" type="text" placeholder="Игра, сервис или адрес…" spellcheck="false" autocomplete="off" />
+      <span class="cmd-esc">Esc</span>
+    </div>
+    <div class="cmd-list" id="cmdList"></div>
+    <div class="cmd-foot">
+      <span><b>↑↓</b> выбрать</span>
+      <span><b>Enter</b> добавить</span>
+      <span id="cmdFoot"></span>
+    </div>
+  </div>
+</div>
+
+<div id="onboardTourOverlay" class="modal-overlay hidden">
+  <div class="modal-card wide">
+    <h3>Zapret загружен — показать, что где?</h3>
+    <p>Короткий тур по всем разделам: что где находится, как включить обход, проверить, что работает, и настроить Telegram. Занимает пару минут, можно пропустить в любой момент.</p>
+    <div class="modal-actions">
+      <button id="onboardSkipBtn" class="btn ghost">Пропустить</button>
+      <button id="onboardStartBtn" class="btn primary">Начать тур</button>
+    </div>
+  </div>
+</div>
+
+<div id="wizardChoiceOverlay" class="modal-overlay hidden">
+  <div class="modal-card wide">
+    <h3>Что хочешь настроить?</h3>
+    <p>Klutz умеет обходить блокировку Discord и YouTube (через zapret) и отдельно — Telegram. Можно и то, и другое, в любом порядке — проведу по шагам.</p>
+    <div class="wizard-choice-actions">
+      <button class="btn ghost" id="wizardChooseDiscordBtn">Discord и YouTube</button>
+      <button class="btn ghost" id="wizardChooseTelegramBtn">Telegram</button>
+      <button class="btn primary" id="wizardChooseBothBtn">И то, и другое</button>
+    </div>
+  </div>
+</div>
+
+<div id="wizardCrossOfferOverlay" class="modal-overlay hidden">
+  <div class="modal-card">
+    <p id="wizardCrossOfferText"></p>
+    <div class="modal-actions">
+      <button id="wizardCrossOfferNoBtn" class="btn ghost">Нет, хватит</button>
+      <button id="wizardCrossOfferYesBtn" class="btn primary">Да, давай</button>
+    </div>
+  </div>
+</div>
+
+<div id="tourOverlay" class="tour-overlay hidden">
+  <div id="tourBlocker" class="tour-blocker"></div>
+  <div id="tourHighlight" class="tour-highlight"></div>
+  <div id="tourCallout" class="tour-callout">
+    <div class="tour-callout-step" id="tourStepLabel"></div>
+    <h4 id="tourTitle"></h4>
+    <p id="tourText"></p>
+    <div class="tour-callout-actions">
+      <button id="tourSkipBtn" class="btn ghost xs">Пропустить тур</button>
+      <div class="tour-nav">
+        <button id="tourPrevBtn" class="btn ghost xs">Назад</button>
+        <button id="tourNextBtn" class="btn primary xs">Далее</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ Онбординг ══════════ -->
+<section id="dropZone" class="dropzone">
+  <div class="dropzone-inner">
+    <button id="cancelChangeReleaseBtn" class="link-btn hidden">← Отмена, вернуться к текущему релизу</button>
+    <div class="dz-icon">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/>
+      </svg>
+    </div>
+    <h2>Сначала нужен сам zapret</h2>
+    <p class="dz-sub">
+      Это набор инструментов, который обходит блокировку Discord и YouTube —
+      приложение им управляет, но сам он загружается отдельно.
+    </p>
+
+    <div class="dz-card">
+      <div id="onboardVersionInfo" class="dz-version">проверяю доступную версию…</div>
+      <button id="downloadLatestBtn" class="btn primary" disabled>Скачать последнюю версию</button>
+    </div>
+
+    <div id="downloadProgressWrap" class="dl-progress hidden">
+      <div class="dl-bar"><div id="downloadProgressFill" class="dl-fill"></div></div>
+      <div id="downloadProgressText" class="dz-hint"></div>
+    </div>
+
+    <button id="showManualLoadBtn" class="link-btn">Уже скачан — выбрать вручную →</button>
+
+    <div id="manualLoadSection" class="dz-actions hidden">
+      <button id="pickFolderBtn" class="btn ghost">Выбрать папку</button>
+      <button id="pickArchiveBtn" class="btn ghost">Выбрать .zip</button>
+    </div>
+
+    <p id="loadError" class="error"></p>
+  </div>
+</section>
+
+<!-- ══════════ Приложение ══════════ -->
+<div class="shell hidden" id="shell">
+
+  <!-- Сайдбар 212px -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sb-head">
+      <div class="sb-logo">
+        <img class="logo-light" src="assets/logo-for-light-64.png" alt="" />
+        <img class="logo-dark" src="assets/logo-for-dark-64.png" alt="" />
+        <span>Klutz</span>
+      </div>
+      <button class="sb-collapse" id="sidebarCollapseBtn" title="Свернуть панель" aria-label="Свернуть панель">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M9.94358 2.25C8.10583 2.24998 6.65019 2.24997 5.51098 2.40314C4.33856 2.56076 3.38961 2.89288 2.64124 3.64124C1.89288 4.38961 1.56076 5.33856 1.40314 6.51098C1.24997 7.65019 1.24998 9.10582 1.25 10.9436V13.0564C1.24998 14.8942 1.24997 16.3498 1.40314 17.489C1.56076 18.6614 1.89288 19.6104 2.64124 20.3588C3.38961 21.1071 4.33856 21.4392 5.51098 21.5969C6.65018 21.75 8.1058 21.75 9.94354 21.75H14.0564C14.3706 21.75 14.6738 21.75 14.966 21.7492C14.9773 21.7497 14.9886 21.75 15 21.75C15.0129 21.75 15.0257 21.7497 15.0384 21.749C16.4224 21.7448 17.5607 21.7217 18.489 21.5969C19.6614 21.4392 20.6104 21.1071 21.3588 20.3588C22.1071 19.6104 22.4392 18.6614 22.5969 17.489C22.75 16.3498 22.75 14.8942 22.75 13.0565V10.9436C22.75 9.10585 22.75 7.65018 22.5969 6.51098C22.4392 5.33856 22.1071 4.38961 21.3588 3.64124C20.6104 2.89288 19.6614 2.56076 18.489 2.40314C17.5607 2.27833 16.4224 2.25523 15.0384 2.25096C15.0257 2.25032 15.0129 2.25 15 2.25C14.9886 2.25 14.9773 2.25025 14.966 2.25076C14.6737 2.25 14.3707 2.25 14.0564 2.25H9.94358ZM14.25 3.75002C14.1677 3.75 14.0844 3.75 14 3.75H10C8.09318 3.75 6.73851 3.75159 5.71085 3.88976C4.70476 4.02503 4.12511 4.27869 3.7019 4.7019C3.27869 5.12511 3.02503 5.70476 2.88976 6.71085C2.75159 7.73851 2.75 9.09318 2.75 11V13C2.75 14.9068 2.75159 16.2615 2.88976 17.2892C3.02503 18.2952 3.27869 18.8749 3.7019 19.2981C4.12511 19.7213 4.70476 19.975 5.71085 20.1102C6.73851 20.2484 8.09318 20.25 10 20.25H14C14.0844 20.25 14.1677 20.25 14.25 20.25L14.25 3.75002ZM15.75 20.2443C16.7836 20.2334 17.6082 20.2018 18.2892 20.1102C19.2952 19.975 19.8749 19.7213 20.2981 19.2981C20.7213 18.8749 20.975 18.2952 21.1102 17.2892C21.2484 16.2615 21.25 14.9068 21.25 13V11C21.25 9.09318 21.2484 7.73851 21.1102 6.71085C20.975 5.70476 20.7213 5.12511 20.2981 4.7019C19.8749 4.27869 19.2952 4.02503 18.2892 3.88976C17.6082 3.79821 16.7836 3.76662 15.75 3.75573L15.75 20.2443Z"/>
+        </svg>
+      </button>
+    </div>
+
+    <nav class="sb-nav" id="navList">
+      <div class="nav-item active" data-page="home" title="Главная">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M2.02783 11.25C2.41136 6.07745 6.72957 2 12.0001 2C11.1693 2 10.4295 2.36421 9.82093 2.92113C9.21541 3.47525 8.70371 4.24878 8.28983 5.16315C7.87352 6.08292 7.55013 7.15868 7.33126 8.32611C7.1558 9.26194 7.04903 10.2485 7.01344 11.25H2.02783ZM2.02783 12.75H7.01344C7.04903 13.7515 7.1558 14.7381 7.33126 15.6739C7.55013 16.8413 7.87351 17.9171 8.28983 18.8368C8.70371 19.7512 9.21541 20.5247 9.82093 21.0789C10.4295 21.6358 11.1693 22 12.0001 22C6.72957 22 2.41136 17.9226 2.02783 12.75Z"/>
+          <path d="M12.0001 3.39535C11.7251 3.39535 11.3699 3.51236 10.9567 3.89042C10.5406 4.27126 10.1239 4.86815 9.75585 5.68137C9.3902 6.4892 9.09329 7.46441 8.88897 8.55419C8.72806 9.41242 8.62824 10.3222 8.59321 11.25H15.4071C15.372 10.3222 15.2722 9.41242 15.1113 8.5542C14.907 7.46441 14.6101 6.48921 14.2444 5.68137C13.8763 4.86815 13.4597 4.27126 13.0435 3.89042C12.6304 3.51236 12.2751 3.39535 12.0001 3.39535Z"/>
+          <path d="M8.88897 15.4458C9.09329 16.5356 9.3902 17.5108 9.75585 18.3186C10.1239 19.1319 10.5406 19.7287 10.9567 20.1096C11.3698 20.4876 11.7251 20.6047 12.0001 20.6047C12.2751 20.6047 12.6304 20.4876 13.0435 20.1096C13.4597 19.7287 13.8763 19.1319 14.2444 18.3186C14.6101 17.5108 14.907 16.5356 15.1113 15.4458C15.2722 14.5876 15.372 13.6778 15.4071 12.75H8.59321C8.62824 13.6778 8.72806 14.5876 8.88897 15.4458Z"/>
+          <path d="M12.0001 2C12.831 2 13.5708 2.36421 14.1793 2.92113C14.7849 3.47525 15.2966 4.24878 15.7104 5.16315C16.1267 6.08292 16.4501 7.15868 16.669 8.32612C16.8445 9.26194 16.9512 10.2485 16.9868 11.25H21.9724C21.5889 6.07745 17.2707 2 12.0001 2Z"/>
+          <path d="M16.669 15.6739C16.4501 16.8413 16.1267 17.9171 15.7104 18.8368C15.2966 19.7512 14.7849 20.5247 14.1793 21.0789C13.5708 21.6358 12.831 22 12.0001 22C17.2707 22 21.5889 17.9226 21.9724 12.75H16.9868C16.9512 13.7515 16.8445 14.7381 16.669 15.6739Z"/>
+        </svg>
+        <span>Главная</span>
+      </div>
+
+      <div class="nav-item" data-page="strategies" title="Стратегии">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M3.46447 3.46447C2 4.92893 2 7.28595 2 12C2 16.714 2 19.0711 3.46447 20.5355C4.92893 22 7.28595 22 12 22C16.714 22 19.0711 22 20.5355 20.5355C22 19.0711 22 16.714 22 12C22 7.28595 22 4.92893 20.5355 3.46447C19.0711 2 16.714 2 12 2C7.28595 2 4.92893 2 3.46447 3.46447ZM6.42385 9.51988C6.68903 9.20167 7.16195 9.15868 7.48016 9.42385L7.75658 9.6542C8.36153 10.1583 8.87653 10.5874 9.23295 10.9821C9.61151 11.4013 9.90694 11.8834 9.90694 12.5C9.90694 13.1166 9.61151 13.5987 9.23295 14.0179C8.87653 14.4126 8.36153 14.8418 7.75658 15.3458L7.48016 15.5762C7.16195 15.8414 6.68903 15.7984 6.42385 15.4802C6.15868 15.1619 6.20167 14.689 6.51988 14.4239L6.75428 14.2285C7.41285 13.6797 7.84348 13.3185 8.11968 13.0126C8.38196 12.7222 8.40694 12.586 8.40694 12.5C8.40694 12.414 8.38196 12.2779 8.11968 11.9874C7.84348 11.6815 7.41285 11.3203 6.75429 10.7715L6.51988 10.5762C6.20167 10.311 6.15868 9.83809 6.42385 9.51988ZM17.75 15C17.75 15.4142 17.4142 15.75 17 15.75H12C11.5858 15.75 11.25 15.4142 11.25 15C11.25 14.5858 11.5858 14.25 12 14.25H17C17.4142 14.25 17.75 14.5858 17.75 15Z"/>
+        </svg>
+        <span>Стратегии</span>
+      </div>
+
+      <div class="nav-item" data-page="diagnostics" title="Диагностика">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M8.96173 19.3707C6.01943 16.9714 2 13.0079 2 9.26044C2 3.3495 7.50016 0.662637 12 5.49877C16.4998 0.662637 22 3.34931 22 9.2604C22 13.008 17.9806 16.9714 15.0383 19.3707C13.7063 20.4569 13.0403 21 12 21C10.9597 21 10.2937 20.4569 8.96173 19.3707ZM10.0932 10.7463C10.1827 10.6184 10.2571 10.5122 10.3233 10.4213C10.3793 10.5188 10.4418 10.6324 10.517 10.7692L12.2273 13.8787C12.3933 14.1808 12.5562 14.4771 12.7197 14.6921C12.8947 14.9221 13.2023 15.2374 13.6954 15.2466C14.1884 15.2559 14.5077 14.9524 14.6912 14.7291C14.8627 14.5204 15.0365 14.2305 15.2138 13.9349L15.2692 13.8425C15.49 13.4745 15.629 13.2444 15.752 13.0782C15.8654 12.9251 15.9309 12.8751 15.9798 12.8475C16.0286 12.8198 16.1052 12.7894 16.2948 12.7709C16.5006 12.7509 16.7694 12.7501 17.1986 12.7501H18C18.4142 12.7501 18.75 12.4143 18.75 12.0001C18.75 11.5859 18.4142 11.2501 18 11.2501L17.1662 11.2501C16.7791 11.2501 16.4367 11.2501 16.1497 11.278C15.8385 11.3082 15.5357 11.3751 15.2407 11.5422C14.9457 11.7092 14.7325 11.9344 14.5465 12.1857C14.3749 12.4174 14.1988 12.711 13.9996 13.043L13.9521 13.1222C13.8654 13.2668 13.793 13.3872 13.7284 13.4906C13.6676 13.3849 13.5999 13.2618 13.5186 13.1141L11.8092 10.006C11.6551 9.7256 11.5015 9.44626 11.3458 9.24147C11.1756 9.01775 10.8839 8.72194 10.4164 8.6967C9.94887 8.67146 9.62698 8.93414 9.43373 9.13823C9.25683 9.32506 9.0741 9.58625 8.89069 9.84841L8.58131 10.2904C8.35416 10.6149 8.21175 10.8171 8.08848 10.9629C7.975 11.0971 7.91193 11.1411 7.86538 11.1653C7.81882 11.1896 7.74663 11.216 7.57159 11.232C7.38144 11.2494 7.13413 11.2501 6.73803 11.2501H6C5.58579 11.2501 5.25 11.5859 5.25 12.0001C5.25 12.4143 5.58579 12.7501 6 12.7501L6.76812 12.7501C7.12509 12.7501 7.44153 12.7501 7.70801 12.7258C7.99707 12.6994 8.27904 12.6411 8.55809 12.4958C8.83714 12.3505 9.04661 12.153 9.234 11.9313C9.40676 11.7269 9.58821 11.4677 9.79291 11.1752L10.0932 10.7463Z"/>
+        </svg>
+        <span>Диагностика</span>
+      </div>
+
+      <div class="nav-item" data-page="telegram" title="Telegram">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M20.7096 3.6545C20.7096 3.6545 22.6523 2.897 22.4904 4.73664C22.4364 5.49415 21.9508 8.1454 21.573 11.0131L20.2779 19.5079C20.2779 19.5079 20.17 20.7524 19.1987 20.9688C18.2273 21.1852 16.7704 20.2113 16.5005 19.9949C16.2847 19.8326 12.4534 17.3977 11.1043 16.2074C10.7265 15.8827 10.2948 15.2334 11.1582 14.4759L16.8243 9.06525C17.4719 8.41595 18.1194 6.90095 15.4213 8.7406L7.86655 13.8808C7.86655 13.8808 7.00315 14.4218 5.3843 13.9349L1.87671 12.8527C1.87671 12.8527 0.581605 12.0411 2.79408 11.2295C8.19035 8.68645 14.8277 6.0893 20.7096 3.6545Z"/>
+        </svg>
+        <span>Telegram</span>
+      </div>
+
+      <div class="nav-item" data-page="settings" title="Настройки">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M14.2788 2.15224C13.9085 2 13.439 2 12.5 2C11.561 2 11.0915 2 10.7212 2.15224C10.2274 2.35523 9.83509 2.74458 9.63056 3.23463C9.53719 3.45834 9.50065 3.7185 9.48635 4.09799C9.46534 4.65568 9.17716 5.17189 8.69017 5.45093C8.20318 5.72996 7.60864 5.71954 7.11149 5.45876C6.77318 5.2813 6.52789 5.18262 6.28599 5.15102C5.75609 5.08178 5.22018 5.22429 4.79616 5.5472C4.47814 5.78938 4.24339 6.1929 3.7739 6.99993C3.30441 7.80697 3.06967 8.21048 3.01735 8.60491C2.94758 9.1308 3.09118 9.66266 3.41655 10.0835C3.56506 10.2756 3.77377 10.437 4.0977 10.639C4.57391 10.936 4.88032 11.4419 4.88029 12C4.88026 12.5581 4.57386 13.0639 4.0977 13.3608C3.77372 13.5629 3.56497 13.7244 3.41645 13.9165C3.09108 14.3373 2.94749 14.8691 3.01725 15.395C3.06957 15.7894 3.30432 16.193 3.7738 17C4.24329 17.807 4.47804 18.2106 4.79606 18.4527C5.22008 18.7756 5.75599 18.9181 6.28589 18.8489C6.52778 18.8173 6.77305 18.7186 7.11133 18.5412C7.60852 18.2804 8.2031 18.27 8.69012 18.549C9.17714 18.8281 9.46533 19.3443 9.48635 19.9021C9.50065 20.2815 9.53719 20.5417 9.63056 20.7654C9.83509 21.2554 10.2274 21.6448 10.7212 21.8478C11.0915 22 11.561 22 12.5 22C13.439 22 13.9085 22 14.2788 21.8478C14.7726 21.6448 15.1649 21.2554 15.3694 20.7654C15.4628 20.5417 15.4994 20.2815 15.5137 19.902C15.5347 19.3443 15.8228 18.8281 16.3098 18.549C16.7968 18.2699 17.3914 18.2804 17.8886 18.5412C18.2269 18.7186 18.4721 18.8172 18.714 18.8488C19.2439 18.9181 19.7798 18.7756 20.2038 18.4527C20.5219 18.2105 20.7566 17.807 21.2261 16.9999C21.6956 16.1929 21.9303 15.7894 21.9827 15.395C22.0524 14.8691 21.9088 14.3372 21.5835 13.9164C21.4349 13.7243 21.2262 13.5628 20.9022 13.3608C20.4261 13.0639 20.1197 12.558 20.1197 11.9999C20.1197 11.4418 20.4261 10.9361 20.9022 10.6392C21.2263 10.4371 21.435 10.2757 21.5836 10.0835C21.9089 9.66273 22.0525 9.13087 21.9828 8.60497C21.9304 8.21055 21.6957 7.80703 21.2262 7C20.7567 6.19297 20.522 5.78945 20.2039 5.54727C19.7799 5.22436 19.244 5.08185 18.7141 5.15109C18.4722 5.18269 18.2269 5.28136 17.8887 5.4588C17.3915 5.71959 16.7969 5.73002 16.3099 5.45096C15.8229 5.17191 15.5347 4.65566 15.5136 4.09794C15.4993 3.71848 15.4628 3.45833 15.3694 3.23463C15.1649 2.74458 14.7726 2.35523 14.2788 2.15224ZM12.5 15C14.1695 15 15.5228 13.6569 15.5228 12C15.5228 10.3431 14.1695 9 12.5 9C10.8305 9 9.47716 10.3431 9.47716 12C9.47716 13.6569 10.8305 15 12.5 15Z"/>
+        </svg>
+        <span>Настройки</span>
+      </div>
+    </nav>
+
+    <div class="sb-spacer"></div>
+
+    <div class="sb-version" id="sidebarVersion" title="Загруженный релиз zapret">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M4.17157 3.17157C3 4.34315 3 6.22876 3 10V14C3 17.7712 3 19.6569 4.17157 20.8284C5.34315 22 7.22876 22 11 22H13C16.7712 22 18.6569 22 19.8284 20.8284C21 19.6569 21 17.7712 21 14V10C21 6.22876 21 4.34315 19.8284 3.17157C18.6569 2 16.7712 2 13 2H12V3V4H13.5C13.9714 4 14.2071 4 14.3536 4.14645C14.5 4.29289 14.5 4.5286 14.5 5C14.5 5.4714 14.5 5.70711 14.3536 5.85355C14.2071 6 13.9714 6 13.5 6H12V8H13.5C13.9714 8 14.2071 8 14.3536 8.14645C14.5 8.29289 14.5 8.5286 14.5 9C14.5 9.4714 14.5 9.70711 14.3536 9.85355C14.2071 10 13.9714 10 13.5 10H13C12.5286 10 12.2929 10 12.1464 9.85355C12 9.70711 12 9.4714 12 9V8H10.5C10.0286 8 9.79289 8 9.64645 7.85355C9.5 7.70711 9.5 7.4714 9.5 7C9.5 6.5286 9.5 6.29289 9.64645 6.14645C9.79289 6 10.0286 6 10.5 6H12V4H10.5C10.0286 4 9.79289 4 9.64645 3.85355C9.5 3.70711 9.5 3.4714 9.5 3V2.00338C6.70613 2.02377 5.17628 2.16686 4.17157 3.17157ZM9.5 12.875V13C9.5 14.3807 10.6193 15.5 12 15.5C13.3807 15.5 14.5 14.3807 14.5 13V12.875C14.5 12.3918 14.1082 12 13.625 12H10.375C9.89175 12 9.5 12.3918 9.5 12.875Z"/></svg>
+      <div class="sb-version-text">
+        <div class="sb-version-title" id="sidebarVersionText">zapret не загружен</div>
+        <div class="sb-version-sub" id="sidebarVersionSub">релиз не выбран</div>
+      </div>
+      <span class="sb-version-chev">▴</span>
+    </div>
+  </aside>
+
+  <!-- Меню движка zapret (из строки версии в сайдбаре) -->
+  <div class="engine-menu hidden" id="engineMenu">
+    <div class="engine-menu-head">
+      <div class="engine-menu-title">zapret-discord-youtube</div>
+      <div class="engine-menu-sub" id="engineMenuSub">релиз не загружен</div>
+    </div>
+    <div class="engine-menu-item" id="engineCheckUpdateBtn">
+      <span id="engineUpdateLabel">Проверить обновление</span>
+      <span class="engine-menu-dot hidden" id="engineUpdateDot"></span>
+    </div>
+    <div class="engine-menu-item" id="engineChangeBtn">Сменить релиз…</div>
+    <div class="engine-menu-item" id="engineOpenFolderBtn">Открыть папку релиза</div>
+  </div>
+
+  <!-- Правая колонка -->
+  <div class="main-col">
+
+    <!-- Статус-бар 56px -->
+    <div class="statusbar" id="statusbar">
+      <div class="sbar-left">
+        <div class="sbar-group">
+          <span class="sbar-dot" id="statusDot"></span>
+          <span class="sbar-state" id="statusText">Остановлен</span>
+          <span class="sbar-sep" id="sbarSep1"></span>
+          <span class="sbar-name" id="sbarName"></span>
+          <span class="sbar-uptime" id="sbarUptime"></span>
+        </div>
+        <span class="sbar-divider"></span>
+        <div class="sbar-group">
+          <span class="sbar-dot" id="sbarTgDot"></span>
+          <span class="sbar-tg" id="sbarTgText">Telegram-прокси выключен</span>
+        </div>
+      </div>
+      <div class="sbar-right">
+        <button class="icon-btn" id="themeBtn" title="Тема" aria-label="Тема">
+          <svg class="icon-moon" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M13 10.2A5.6 5.6 0 0 1 5.8 3 5.9 5.9 0 1 0 13 10.2Z"/>
+          </svg>
+          <svg class="icon-sun" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <circle cx="8" cy="8" r="3.2"/><line x1="8" y1="1" x2="8" y2="2.6"/><line x1="8" y1="13.4" x2="8" y2="15"/>
+            <line x1="1" y1="8" x2="2.6" y2="8"/><line x1="13.4" y1="8" x2="15" y2="8"/>
+            <line x1="3.5" y1="3.5" x2="4.6" y2="4.6"/><line x1="11.4" y1="11.4" x2="12.5" y2="12.5"/>
+            <line x1="3.5" y1="12.5" x2="4.6" y2="11.4"/><line x1="11.4" y1="4.6" x2="12.5" y2="3.5"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="aboutBtn" title="О программе" aria-label="О программе">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+            <circle cx="8" cy="8" r="6.4"/><line x1="8" y1="7.2" x2="8" y2="11.4"/>
+            <circle cx="8" cy="4.9" r=".55" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <main class="content" id="content">
+
+      <!-- ═══ Главная ═══ -->
+      <section id="pageHome" class="page hidden">
+
+        <!-- Герой простого режима: одна кнопка вместо всей раскладки -->
+        <div class="simple-hero hidden" id="heroSimple">
+          <div class="simple-halo" id="simpleHalo"></div>
+          <button class="simple-circle" id="simpleCircle" title="Включить обход">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10.875 12V4.5C10.875 4.20163 10.9935 3.91548 11.2045 3.7045C11.4155 3.49353 11.7016 3.375 12 3.375C12.2984 3.375 12.5845 3.49353 12.7955 3.7045C13.0065 3.91548 13.125 4.20163 13.125 4.5V12C13.125 12.2984 13.0065 12.5845 12.7955 12.7955C12.5845 13.0065 12.2984 13.125 12 13.125C11.7016 13.125 11.4155 13.0065 11.2045 12.7955C10.9935 12.5845 10.875 12.2984 10.875 12ZM17.1141 4.3125C16.8643 4.15868 16.5642 4.10853 16.278 4.17274C15.9917 4.23694 15.7419 4.41043 15.5817 4.6562C15.4215 4.90197 15.3637 5.2006 15.4205 5.4884C15.4774 5.77621 15.6444 6.03043 15.8859 6.19687C17.9447 7.53469 19.125 9.65625 19.125 12C19.125 13.8897 18.3743 15.7019 17.0381 17.0381C15.7019 18.3743 13.8897 19.125 12 19.125C10.1103 19.125 8.29806 18.3743 6.96186 17.0381C5.62567 15.7019 4.875 13.8897 4.875 12C4.875 9.65625 6.05531 7.53469 8.11406 6.19219C8.34278 6.02077 8.49768 5.76871 8.54729 5.48722C8.5969 5.20573 8.5375 4.9159 8.38116 4.67662C8.22482 4.43734 7.98326 4.26653 7.70555 4.1989C7.42784 4.13127 7.13479 4.17189 6.88594 4.3125C4.1775 6.07313 2.625 8.87719 2.625 12C2.625 14.4864 3.61272 16.871 5.37087 18.6291C7.12903 20.3873 9.5136 21.375 12 21.375C14.4864 21.375 16.871 20.3873 18.6291 18.6291C20.3873 16.871 21.375 14.4864 21.375 12C21.375 8.87719 19.8225 6.07313 17.1141 4.3125Z"/></svg>
+          </button>
+          <div class="simple-hint" id="simpleHint">нажмите, чтобы включить</div>
+          <div class="simple-title" id="simpleTitle">Обход выключен</div>
+          <div class="simple-sub" id="simpleSub"></div>
+          <div class="simple-progress hidden" id="simpleProgress"><div id="simpleProgressFill"></div></div>
+          <div class="simple-actions hidden" id="simpleCancelWrap">
+            <button class="btn ghost" id="simpleCancelBtn">Отменить</button>
+          </div>
+          <div class="simple-actions hidden" id="simpleHelpActions">
+            <button class="btn primary" id="simplePickBtn">Прогнать тесты и подобрать</button>
+            <button class="btn ghost" id="simpleAltBtn">Выбрать другой вариант</button>
+          </div>
+          <div class="simple-alts hidden" id="simpleAlts"></div>
+        </div>
+
+        <!-- Герой: работает, всё отвечает -->
+        <div class="hero-banded ok hidden" id="heroActive">
+          <div class="hero-band">
+            <div class="hero-info">
+              <div class="hero-eyebrow ok">
+                <span class="hero-live-dot" id="heroLiveDot"></span><span id="heroLive">Zapret работает</span>
+              </div>
+              <div class="hero-title" id="heroOkTitle">Обход включён</div>
+            </div>
+            <div class="hero-actions">
+              <button class="btn stop-soft" id="heroStopBtn">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" style="margin-right:9px;vertical-align:-2px"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22ZM8.58579 8.58579C8 9.17157 8 10.1144 8 12C8 13.8856 8 14.8284 8.58579 15.4142C9.17157 16 10.1144 16 12 16C13.8856 16 14.8284 16 15.4142 15.4142C16 14.8284 16 13.8856 16 12C16 10.1144 16 9.17157 15.4142 8.58579C14.8284 8 13.8856 8 12 8C10.1144 8 9.17157 8 8.58579 8.58579Z"/></svg>Остановить
+              </button>
+            </div>
+          </div>
+          <div class="hero-stats">
+            <div class="hero-stat"><div class="hero-stat-label">Вариант</div><div class="hero-stat-val" id="heroName">—</div></div>
+            <div class="hero-stat"><div class="hero-stat-label">Работает</div><div class="hero-stat-val" id="heroUptime">—</div></div>
+            <div class="hero-stat"><div class="hero-stat-label">Цели</div><div class="hero-stat-val" id="heroHealth">—</div></div>
+          </div>
+        </div>
+
+        <!-- Герой: включён, но отвечают не все цели -->
+        <div class="hero-panel hidden" id="heroDegraded">
+          <div class="hero-info">
+            <div class="hero-badges">
+              <span class="status-dot ok"></span>
+              <span class="hero-eyebrow">Включён</span>
+              <span class="hero-pill" id="heroDegradedName">—</span>
+            </div>
+            <div class="hero-name" id="heroDegradedTitle">Работает, но не всё отвечает</div>
+            <div class="hero-sub" id="heroDegradedSub"></div>
+          </div>
+          <div class="hero-side">
+            <button class="btn primary lg" id="heroDegradedPickBtn">Подобрать другой вариант</button>
+            <button class="btn ghost" id="heroDegradedDiagBtn">Проверить систему</button>
+            <button class="btn stop-soft" id="heroDegradedStopBtn">Остановить</button>
+          </div>
+        </div>
+
+        <!-- Герой: подбор закончился, ничего не пробило -->
+        <div class="hero-panel col hidden" id="heroFailed">
+          <div class="hero-panel-row">
+            <div class="hero-info">
+              <div class="hero-badges">
+                <span class="status-dot bad"></span>
+                <span class="hero-eyebrow">Подбор завершён</span>
+              </div>
+              <div class="hero-name">Ни один вариант не пробил блокировку</div>
+              <div class="hero-sub" id="heroFailedSub"></div>
+            </div>
+            <div class="hero-side">
+              <button class="btn primary lg" id="heroAltBtn">Попробовать вручную</button>
+              <button class="btn ghost" id="heroFailedRetryBtn">Прогнать ещё раз</button>
+              <button class="btn stop-soft" id="heroFailedStopBtn">Остановить</button>
+              <button class="link-btn" id="heroFailedDiagBtn">Проверить систему →</button>
+            </div>
+          </div>
+          <div class="hero-alts hidden" id="heroAlts"></div>
+        </div>
+
+        <!-- Герой: идёт подбор -->
+        <div class="hero-panel hidden" id="heroPicking">
+          <div class="hero-info">
+            <div class="hero-badges">
+              <span class="hero-live-dot"></span>
+              <span class="hero-eyebrow">Подбираю</span>
+            </div>
+            <div class="hero-name">Проверяю варианты обхода</div>
+            <div class="hero-sub" id="heroPickStatus">готовлю прогон…</div>
+            <div class="hero-progress"><div class="hero-progress-fill" id="heroPickProgress"></div></div>
+          </div>
+          <div class="hero-side">
+            <button class="btn stop-lg" id="heroCancelBtn">Отменить</button>
+            <div class="hero-note">обычно занимает пару минут</div>
+          </div>
+        </div>
+
+        <!-- Герой: выключен -->
+        <div class="hero-banded hidden" id="heroIdle">
+          <div class="hero-band">
+            <div class="hero-info">
+              <div class="hero-eyebrow">Zapret</div>
+              <div class="hero-title">Выключен</div>
+            </div>
+            <div class="hero-actions">
+              <button class="btn ghost hidden" id="heroRedoBtn">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" style="margin-right:7px;vertical-align:-2px"><path d="M8.25 9.75004H3.75C3.55109 9.75004 3.36032 9.67102 3.21967 9.53037C3.07902 9.38972 3 9.19895 3 9.00004V4.50004C3 4.30113 3.07902 4.11036 3.21967 3.96971C3.36032 3.82906 3.55109 3.75004 3.75 3.75004C3.94891 3.75004 4.13968 3.82906 4.28033 3.96971C4.42098 4.11036 4.5 4.30113 4.5 4.50004V7.18973L5.87156 5.81816C7.54426 4.13705 9.816 3.18883 12.1875 3.18191H12.2372C14.5885 3.17586 16.8476 4.09639 18.525 5.7441C18.662 5.88422 18.7387 6.07238 18.7387 6.26832C18.7387 6.46426 18.662 6.65242 18.5251 6.79256C18.3881 6.93269 18.2018 7.01367 18.0059 7.01816C17.81 7.02266 17.6201 6.95031 17.4769 6.8166C16.0787 5.44417 14.1964 4.67732 12.2372 4.68191H12.195C10.2189 4.688 8.32601 5.478 6.93188 6.87848L5.56031 8.25004H8.25C8.44891 8.25004 8.63968 8.32906 8.78033 8.46971C8.92098 8.61036 9 8.80113 9 9.00004C9 9.19895 8.92098 9.38972 8.78033 9.53037C8.63968 9.67102 8.44891 9.75004 8.25 9.75004ZM20.25 14.25H15.75C15.5511 14.25 15.3603 14.3291 15.2197 14.4697C15.079 14.6104 15 14.8011 15 15C15 15.199 15.079 15.3897 15.2197 15.5304C15.3603 15.671 15.5511 15.75 15.75 15.75H18.4397L17.0681 17.1216C15.6742 18.5218 13.7817 19.3118 11.8059 19.3182H11.7638C9.80454 19.3228 7.92227 18.5559 6.52406 17.1835C6.45421 17.112 6.37077 17.0552 6.27866 17.0165C6.18655 16.9777 6.08762 16.9577 5.98769 16.9577C5.88775 16.9577 5.78883 16.9777 5.69672 17.0165C5.60461 17.0553 5.52119 17.1121 5.45134 17.1835C5.38149 17.255 5.32663 17.3397 5.28998 17.4327C5.25333 17.5257 5.23563 17.625 5.23793 17.7249C5.24022 17.8248 5.26245 17.9233 5.30333 18.0145C5.3442 18.1057 5.40289 18.1878 5.47594 18.256C7.15338 19.9037 9.41242 20.8242 11.7638 20.8182H11.8125C14.1837 20.811 16.455 19.8628 18.1275 18.1819L19.5 16.8104V19.5C19.5 19.699 19.579 19.8897 19.7197 20.0304C19.8603 20.171 20.0511 20.25 20.25 20.25C20.4489 20.25 20.6397 20.171 20.7803 20.0304C20.921 19.8897 21 19.699 21 19.5V15C21 14.8011 20.921 14.6104 20.7803 14.4697C20.6397 14.3291 20.4489 14.25 20.25 14.25Z"/></svg>Подобрать заново
+              </button>
+              <button class="btn primary lg" id="heroStartBtn">
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" style="margin-right:8px;vertical-align:-2px"><path d="M10.875 12V4.5C10.875 4.20163 10.9935 3.91548 11.2045 3.7045C11.4155 3.49353 11.7016 3.375 12 3.375C12.2984 3.375 12.5845 3.49353 12.7955 3.7045C13.0065 3.91548 13.125 4.20163 13.125 4.5V12C13.125 12.2984 13.0065 12.5845 12.7955 12.7955C12.5845 13.0065 12.2984 13.125 12 13.125C11.7016 13.125 11.4155 13.0065 11.2045 12.7955C10.9935 12.5845 10.875 12.2984 10.875 12ZM17.1141 4.3125C16.8643 4.15868 16.5642 4.10853 16.278 4.17274C15.9917 4.23694 15.7419 4.41043 15.5817 4.6562C15.4215 4.90197 15.3637 5.2006 15.4205 5.4884C15.4774 5.77621 15.6444 6.03043 15.8859 6.19687C17.9447 7.53469 19.125 9.65625 19.125 12C19.125 13.8897 18.3743 15.7019 17.0381 17.0381C15.7019 18.3743 13.8897 19.125 12 19.125C10.1103 19.125 8.29806 18.3743 6.96186 17.0381C5.62567 15.7019 4.875 13.8897 4.875 12C4.875 9.65625 6.05531 7.53469 8.11406 6.19219C8.34278 6.02077 8.49768 5.76871 8.54729 5.48722C8.5969 5.20573 8.5375 4.9159 8.38116 4.67662C8.22482 4.43734 7.98326 4.26653 7.70555 4.1989C7.42784 4.13127 7.13479 4.17189 6.88594 4.3125C4.1775 6.07313 2.625 8.87719 2.625 12C2.625 14.4864 3.61272 16.871 5.37087 18.6291C7.12903 20.3873 9.5136 21.375 12 21.375C14.4864 21.375 16.871 20.3873 18.6291 18.6291C20.3873 16.871 21.375 14.4864 21.375 12C21.375 8.87719 19.8225 6.07313 17.1141 4.3125Z"/></svg><span id="heroStartLabel">Подобрать и включить</span>
+              </button>
+            </div>
+          </div>
+          <div class="hero-stats">
+            <div class="hero-stat"><div class="hero-stat-label">Вариант</div><div class="hero-stat-val" id="statVariant">—</div></div>
+            <div class="hero-stat"><div class="hero-stat-label">Последний прогон</div><div class="hero-stat-val" id="statLastRun">—</div></div>
+            <div class="hero-stat"><div class="hero-stat-label">Сейчас</div><div class="hero-stat-val muted" id="statNow">Discord и YouTube напрямую</div></div>
+          </div>
+        </div>
+
+        <!-- Что обходим: два независимых движка -->
+        <div class="card">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Что обходим</span>
+              <span class="ch-sub">два независимых движка</span>
+            </div>
+          </div>
+          <div class="srow">
+            <div class="srow-text with-dot">
+              <span class="status-dot" id="engineZapretDot"></span>
+              <div>
+                <div class="srow-title">Zapret</div>
+                <div class="srow-desc">Discord, YouTube, игровые сервисы</div>
+              </div>
+            </div>
+            <div class="srow-ctl">
+              <button class="btn ghost xs adv-only" id="engineZapretLink">Стратегии</button>
+              <span class="toggle" id="engineZapretToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+          <div class="srow">
+            <div class="srow-text with-dot">
+              <span class="status-dot" id="engineTgDot"></span>
+              <div>
+                <div class="srow-title">Telegram-прокси</div>
+                <div class="srow-desc" id="engineTgDesc">Telegram — отдельный MTProto-прокси</div>
+              </div>
+            </div>
+            <div class="srow-ctl">
+              <button class="btn ghost xs" id="engineTgLink">Настроить</button>
+              <span class="toggle" id="engineTgToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Здоровье связи -->
+        <!-- CTA -->
+        <div class="cta adv-only" id="ctaTests">
+          <div>
+            <div class="cta-title">Прогнать тесты стратегий</div>
+            <div class="cta-sub">Проверит все конфиги по целям обхода и покажет, какие пробивают блокировку. Занимает несколько минут, можно отменить.</div>
+          </div>
+          <button class="btn primary" id="homeGoTestsBtn">Перейти к тестам</button>
+        </div>
+
+        <!-- Автоматизация -->
+        <div class="auto-cards">
+          <div class="auto-card">
+            <div class="ac-label">При входе в Windows</div>
+            <div class="ac-row">
+              <div>
+                <div class="ac-val" id="chipAutostart">—</div>
+                <div class="ac-hint">включать обход сразу после входа</div>
+              </div>
+              <span class="toggle" id="homeAutostartToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+          <div class="auto-card">
+            <div class="ac-label">Если связь пропала</div>
+            <div class="ac-row">
+              <div>
+                <div class="ac-val" id="chipHeal">—</div>
+                <div class="ac-hint" id="chipHealHint">автопереключение при сбое</div>
+              </div>
+              <span class="toggle" id="homeAutoSwitchToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="page-foot" id="homeFooter"></div>
+      </section>
+
+      <!-- ═══ Стратегии ═══ -->
+      <section id="pageStrategies" class="page hidden">
+        <div class="page-head">
+          <h1>Стратегии</h1>
+          <p>Конфиги обхода из ядра Zapret. Одна точка запуска на конфиг.</p>
+        </div>
+
+        <div class="subtabs">
+          <div class="subtab active" data-subtab="configs">Конфиги</div>
+          <div class="subtab" data-subtab="tests">Тесты</div>
+        </div>
+
+        <!-- Конфиги -->
+        <div id="paneConfigs" class="pane">
+          <div class="search-row">
+            <div class="search-box">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="7" cy="7" r="4.6"/><line x1="10.4" y1="10.4" x2="14" y2="14"/>
+              </svg>
+              <input id="configSearch" type="text" placeholder="Поиск по конфигам…" spellcheck="false" />
+            </div>
+            <button class="btn ghost" id="changeReleaseBtn">Сменить релиз</button>
+          </div>
+          <div id="groupChips" class="group-chips"></div>
+          <div id="configList" class="config-list"></div>
+        </div>
+
+        <!-- Тесты -->
+        <div id="paneTests" class="pane hidden">
+          <div class="cta tight">
+            <div>
+              <div class="cta-title">Прогон всех конфигов</div>
+              <div class="cta-sub" id="testsSubline">Занимает несколько минут. Лучший результат подсвечивается в таблице.</div>
+            </div>
+            <div class="cta-actions">
+              <div class="seg" id="testModeSwitch">
+                <div class="seg-btn active" data-mode="standard" title="Проверяет доступность сайтов через HTTP/TLS и пинг">HTTP / Ping</div>
+                <div class="seg-btn" data-mode="dpi" title="Ищет характерное зависание на 16–20 КБ — признак того, что DPI режет стратегию">DPI-checker</div>
+                <div class="seg-btn" data-mode="funnel" title="Сначала DPI по всем конфигам, затем HTTP/Ping только по тем, кто прошёл DPI полностью — вдвое быстрее полного прогона">DPI → HTTP</div>
+              </div>
+              <button class="btn primary" id="runTestsBtn">Запустить тесты</button>
+              <button class="btn danger hidden" id="stopTestsBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="margin-right:6px;vertical-align:-2px"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 22C17.5228 22 22 17.5228 22 12C22 6.47715 17.5228 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22ZM8.58579 8.58579C8 9.17157 8 10.1144 8 12C8 13.8856 8 14.8284 8.58579 15.4142C9.17157 16 10.1144 16 12 16C13.8856 16 14.8284 16 15.4142 15.4142C16 14.8284 16 13.8856 16 12C16 10.1144 16 9.17157 15.4142 8.58579C14.8284 8 13.8856 8 12 8C10.1144 8 9.17157 8 8.58579 8.58579Z"/></svg>Остановить
+              </button>
+            </div>
+          </div>
+
+          <pre id="testLog" class="log hidden"></pre>
+
+          <div class="card" id="resultsCard">
+            <div class="tbl-head" id="resultsHead"></div>
+            <div id="resultsBody"></div>
+            <div class="card-foot flat">
+              <label class="toggle-row">
+                <span class="toggle" id="autoApplyToggle"><span class="knob"></span></span>
+                <span class="tr-text">После тестов сразу применить лучшую</span>
+              </label>
+              <div class="ch-right">
+                <span class="cf-meta" id="autoApplyNote">выключено</span>
+                <div class="seg sm adv-only" id="autoApplyHow">
+                  <div class="seg-btn active" data-how="run">запустить</div>
+                  <div class="seg-btn" data-how="service">службой</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="empty hidden" id="testsEmpty">
+            <div class="empty-title">Результатов пока нет</div>
+            <div class="empty-sub">Прогон перебирает все конфиги по очереди и показывает, какой из них сейчас реально пробивает блокировки.</div>
+          </div>
+
+          <p id="testError" class="error"></p>
+
+          <!-- Снимки прогонов и журнал автопереключений (бывшая «История») -->
+          <div id="testsHistory" class="pane"></div>
+        </div>
+
+      </section>
+
+      <!-- ═══ Диагностика ═══ -->
+      <section id="pageDiagnostics" class="page hidden">
+        <div class="page-head">
+          <h1>Диагностика</h1>
+          <p>Снаружи — отвечают ли сервисы. Внутри — живо ли то, от чего зависит обход.</p>
+        </div>
+
+        <div class="sec-row">
+          <div class="sec-title">Снаружи</div>
+          <div class="sec-actions">
+            <span class="sec-meta" id="gamesContext"></span>
+            <label class="toggle-row">
+              <span class="toggle" id="autoCheckToggle"><span class="knob"></span></span>
+              <span class="tr-text">каждые 60 сек</span>
+            </label>
+            <button class="btn ghost sm" id="checkGamesBtn">Проверить</button>
+          </div>
+        </div>
+
+        <div class="card" id="diagCoreCard">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Цели обхода</span>
+              <span class="ch-sub" id="diagCoreSummary">не проверялось</span>
+            </div>
+          </div>
+          <div id="diagCoreRows"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Игровые сервисы</span>
+            </div>
+          </div>
+          <div class="ping-grid" id="diagGameGrid"></div>
+        </div>
+
+        <div class="card adv-only" id="customAddressesCard">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Свои адреса</span>
+              <span class="ch-sub" id="customAddressesCount">—</span>
+            </div>
+            <div class="ch-right">
+              <button class="btn ghost xs" id="resetGamesBtn">По умолчанию</button>
+            </div>
+          </div>
+          <div id="customAddressList"></div>
+          <div class="cmd-row" id="openCmdBtn">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.6"/><line x1="10.4" y1="10.4" x2="14" y2="14"/></svg>
+            <span class="cmd-row-text">Добавить игру, сервис или свой адрес…</span>
+            <span class="cmd-row-key">Ctrl K</span>
+          </div>
+          <p id="gamesMsg" class="area-msg"></p>
+        </div>
+
+        <div class="sec-row">
+          <div class="sec-title">Внутри</div>
+          <div class="sec-actions">
+            <button class="btn ghost sm" id="runDiagBtn">Проверить систему</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Система</span>
+              <span class="ch-sub" id="maintenanceMsg2">не проверялась</span>
+            </div>
+          </div>
+          <div class="diag-hint" id="diagHint">
+            Проверит службу фильтрации Windows, драйвер WinDivert, процесс winws.exe, настройки TCP и файл hosts.
+            Если что-то сломано — предложит исправить одной кнопкой.
+          </div>
+          <div id="diagResults" class="diag-results"></div>
+          <div class="diag-foot hidden" id="diagFoot">
+            <span>Отчёт удобно приложить к вопросу в чате поддержки</span>
+            <button class="btn ghost xs" id="copyDiagBtn">Скопировать отчёт</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Telegram ═══ -->
+      <section id="pageTelegram" class="page hidden">
+        <div class="page-head row">
+          <div>
+            <h1>Telegram-прокси</h1>
+            <p>Локальный MTProto-прокси — заворачивает трафик в WebSocket поверх TLS, для DPI выглядит как обычный HTTPS. Включается и выключается на Главной.</p>
+          </div>
+          <div class="ph-actions">
+            <button class="btn ghost sm hidden" id="tgwsproxyRestartBtn">Перезапустить</button>
+            <button class="btn ghost sm hidden" id="tgwsproxyLogsBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" style="margin-right:6px;vertical-align:-2px"><path d="M4.04817 12C4.36601 12.2614 4.62212 12.5899 4.79817 12.9619C5.24817 13.89 5.24817 15.0244 5.24817 16.125C5.24817 18.4041 5.34192 19.5 7.49817 19.5C7.69708 19.5 7.88785 19.579 8.0285 19.7197C8.16915 19.8603 8.24817 20.0511 8.24817 20.25C8.24817 20.4489 8.16915 20.6397 8.0285 20.7803C7.88785 20.921 7.69708 21 7.49817 21C5.85942 21 4.74942 20.4244 4.19817 19.2881C3.74817 18.36 3.74817 17.2256 3.74817 16.125C3.74817 13.8459 3.65442 12.75 1.49817 12.75C1.29926 12.75 1.10849 12.671 0.967839 12.5303C0.827187 12.3897 0.748169 12.1989 0.748169 12C0.748169 11.8011 0.827187 11.6103 0.967839 11.4697C1.10849 11.329 1.29926 11.25 1.49817 11.25C3.65442 11.25 3.74817 10.1541 3.74817 7.875C3.74817 6.77625 3.74817 5.64 4.19817 4.71187C4.75129 3.57562 5.86129 3 7.50004 3C7.69896 3 7.88972 3.07902 8.03037 3.21967C8.17103 3.36032 8.25004 3.55109 8.25004 3.75C8.25004 3.94891 8.17103 4.13968 8.03037 4.28033C7.88972 4.42098 7.69896 4.5 7.50004 4.5C5.34379 4.5 5.25004 5.59594 5.25004 7.875C5.25004 8.97375 5.25004 10.11 4.80004 11.0381C4.62345 11.4103 4.36669 11.7388 4.04817 12ZM22.5 11.25C20.3438 11.25 20.25 10.1541 20.25 7.875C20.25 6.77625 20.25 5.64 19.8 4.71187C19.2488 3.57562 18.1388 3 16.5 3C16.3011 3 16.1104 3.07902 15.9697 3.21967C15.8291 3.36032 15.75 3.55109 15.75 3.75C15.75 3.94891 15.8291 4.13968 15.9697 4.28033C16.1104 4.42098 16.3011 4.5 16.5 4.5C18.6563 4.5 18.75 5.59594 18.75 7.875C18.75 8.97375 18.75 10.11 19.2 11.0381C19.3761 11.4101 19.6322 11.7386 19.95 12C19.6322 12.2614 19.3761 12.5899 19.2 12.9619C18.75 13.89 18.75 15.0244 18.75 16.125C18.75 18.4041 18.6563 19.5 16.5 19.5C16.3011 19.5 16.1104 19.579 15.9697 19.7197C15.8291 19.8603 15.75 20.0511 15.75 20.25C15.75 20.4489 15.8291 20.6397 15.9697 20.7803C16.1104 20.921 16.3011 21 16.5 21C18.1388 21 19.2488 20.4244 19.8 19.2881C20.25 18.36 20.25 17.2256 20.25 16.125C20.25 13.8459 20.3438 12.75 22.5 12.75C22.699 12.75 22.8897 12.671 23.0304 12.5303C23.171 12.3897 23.25 12.1989 23.25 12C23.25 11.8011 23.171 11.6103 23.0304 11.4697C22.8897 11.329 22.699 11.25 22.5 11.25Z"/></svg>Логи
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Прокси</span>
+              <span class="ch-sub" id="tgwsproxyStatus">остановлен</span>
+            </div>
+            <div class="ch-right">
+              <span class="hero-live-dot off" id="tgwsproxyDot"></span>
+              <span class="hero-live off" id="tgwsproxyLive">ВЫКЛЮЧЕНО</span>
+            </div>
+          </div>
+
+          <!-- Реальный источник состояния для остального кода (Главная и т.д.)
+               остаётся здесь, просто скрыт — включают/выключают с Главной. -->
+          <span class="toggle hidden" id="tgwsproxyToggle"><span class="knob"></span></span>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Запускать вместе с Klutz</div>
+              <div class="srow-desc">Не придётся включать вручную после каждого перезапуска.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="tgwsproxyAutostartToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Настроить в Telegram</div>
+              <div class="srow-desc">Откроет Telegram Desktop с готовым прокси — останется подтвердить.</div>
+            </div>
+            <div class="srow-ctl">
+              <button class="btn ghost xs" id="copyTgLinkBtn">Скопировать ссылку</button>
+              <button class="btn ghost xs" id="openTgLinkBtn" disabled>Открыть</button>
+            </div>
+          </div>
+
+          <div class="srow-expand" id="tgwsproxySettingsPanel">
+            <div class="le-col">
+              <label>Адрес</label>
+              <input type="text" id="tgwsproxyHostInput" class="select-native" style="width: 100%" spellcheck="false" />
+            </div>
+            <div class="le-col">
+              <label>Порт</label>
+              <input type="number" id="tgwsproxyPortInput" class="select-native" style="width: 100%" min="1" max="65535" />
+            </div>
+            <div class="le-col" style="grid-column: 1 / -1">
+              <label>Secret</label>
+              <div class="row-gap">
+                <input type="text" id="tgwsproxySecretInput" class="select-native" style="flex: 1" spellcheck="false" />
+                <button class="btn ghost xs" id="regenTgSecretBtn" title="Сгенерировать новый">Обновить</button>
+              </div>
+            </div>
+            <div class="le-col" style="grid-column: 1 / -1">
+              <label>Датацентры Telegram — по одному DC:IP на строку</label>
+              <textarea id="tgwsproxyDcArea" class="code-area sm" spellcheck="false"></textarea>
+            </div>
+            <div class="le-col" style="grid-column: 1 / -1">
+              <label class="toggle-row">
+                <span class="toggle" id="tgwsproxyCfToggle"><span class="knob"></span></span>
+                <span class="tr-text">Резервный путь через Cloudflare, если прямой WebSocket заблокирован</span>
+              </label>
+            </div>
+            <div style="grid-column: 1 / -1; display: flex; gap: 12px; align-items: center; justify-content: space-between">
+              <p id="tgwsproxySettingsMsg" class="area-msg" style="margin: 0"></p>
+              <button class="btn primary xs" id="tgwsproxySaveBtn">Сохранить</button>
+            </div>
+          </div>
+
+          <pre id="tgwsproxyLog" class="log hidden"></pre>
+        </div>
+      </section>
+
+      <!-- ═══ Настройки ═══ -->
+      <section id="pageSettings" class="page hidden">
+        <div class="page-head">
+          <h1>Настройки</h1>
+          <p id="settingsSub">Четыре группы: автоматизация, уведомления, сеть и фильтры, обслуживание.</p>
+        </div>
+
+        <div class="settings-anchors" id="settingsAnchors">
+          <div class="settings-anchor" data-jump="settingsAutomationCard">Автоматизация</div>
+          <div class="settings-anchor" data-jump="settingsNotifyCard">Уведомления</div>
+          <div class="settings-anchor adv-only" data-jump="settingsNetworkCard">Сеть и фильтры</div>
+          <div class="settings-anchor adv-only" data-jump="settingsMaintCard">Обслуживание</div>
+        </div>
+
+        <div class="statgrid adv-only" id="serviceStatus"></div>
+
+        <!-- Автоматизация -->
+        <div class="card" id="settingsAutomationCard">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Автоматизация</span>
+              <span class="ch-sub">работа без участия пользователя</span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Продвинутый режим</div>
+              <div class="srow-desc">Открывает Стратегии и Диагностику, показывает конфиги, тесты, сырые результаты и настройки сети. В простом режиме — только Главная, Telegram и Настройки.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="advancedToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Включать обход при входе в Windows</div>
+              <div class="srow-desc">Klutz стартует свёрнутым в трей и сразу включает последний рабочий вариант. Через Планировщик Windows, без запроса UAC.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="autostartToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Держать обход включённым, даже когда Klutz закрыт</div>
+              <div class="srow-desc" id="persistentDesc">Сейчас обход останавливается вместе с Klutz.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="persistentToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Сам переключит стратегию, если связь пропала</div>
+              <div class="srow-desc">Когда Discord и YouTube перестают отвечать, Klutz попробует следующий по результатам вариант.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="autoSwitchToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow adv-only">
+            <div class="srow-text">
+              <div class="srow-title">Проверять связь каждые</div>
+              <div class="srow-desc">Как часто опрашивать цели обхода в фоне.</div>
+            </div>
+            <div class="srow-ctl">
+              <div class="seg sm" id="checkIntervalSeg">
+                <div class="seg-btn active" data-sec="30">30 сек</div>
+                <div class="seg-btn" data-sec="60">60 сек</div>
+                <div class="seg-btn" data-sec="300">5 мин</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="srow adv-only">
+            <div class="srow-text">
+              <div class="srow-title">Переключать после</div>
+              <div class="srow-desc" id="thresholdDesc">Сработать после N неудачных проверок подряд.</div>
+            </div>
+            <div class="srow-ctl">
+              <div class="seg sm" id="thresholdSeg">
+                <div class="seg-btn" data-th="2">2</div>
+                <div class="seg-btn active" data-th="3">3</div>
+                <div class="seg-btn" data-th="6">6</div>
+                <div class="seg-btn" data-th="10">10</div>
+              </div>
+              <span class="srow-val">неудачных проверок</span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Периодический автопрогон тестов</div>
+              <div class="srow-desc">Раз в несколько дней сам прогоняет тесты в фоне, чтобы стратегия не устаревала. Запускается, только если ты не за компьютером, и всегда предупреждает уведомлением за пару минут — на это время прервёт текущий обход.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="autoTestToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow adv-only">
+            <div class="srow-text">
+              <div class="srow-title">Как часто</div>
+              <div class="srow-desc">Раз в сколько дней запускать автопрогон.</div>
+            </div>
+            <div class="srow-ctl">
+              <div class="seg sm" id="autoTestIntervalSeg">
+                <div class="seg-btn" data-days="3">3 дня</div>
+                <div class="seg-btn active" data-days="7">7 дней</div>
+                <div class="seg-btn" data-days="14">14 дней</div>
+                <div class="seg-btn" data-days="30">30 дней</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Уведомления -->
+        <div class="card" id="settingsNotifyCard">
+          <div class="card-head">
+            <div class="ch-left"><span class="ch-title">Уведомления</span></div>
+          </div>
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Оповещать через уведомления Windows</div>
+              <div class="srow-desc">Уведомления работают, пока приложение висит в трее.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="notifyToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Громкость звука</div>
+              <div class="srow-desc">Свой сигнал вместо системного звука Windows — громкость настраивается по-настоящему, не просто выбором мелодии.</div>
+            </div>
+            <div class="srow-ctl">
+              <input type="range" id="notifyVolumeRange" class="range-native" min="0" max="100" step="5" />
+              <span class="srow-val" id="notifyVolumeVal">70%</span>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Длительность на экране</div>
+              <div class="srow-desc">Как долго уведомление держится, прежде чем уйти в Центр уведомлений.</div>
+            </div>
+            <div class="srow-ctl">
+              <div class="seg sm" id="notifyDurationSeg">
+                <div class="seg-btn active" data-dur="short">~5 сек</div>
+                <div class="seg-btn" data-dur="long">~25 сек</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Тестовое уведомление</div>
+              <div class="srow-desc" id="notifyMsg">Проверить, что уведомления доходят.</div>
+            </div>
+            <div class="srow-ctl">
+              <button class="btn ghost xs" id="testNotifyBtn">Отправить</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Сеть и фильтры -->
+        <div class="card adv-only" id="settingsNetworkCard">
+          <div class="card-head">
+            <div class="ch-left"><span class="ch-title">Сеть и фильтры</span></div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Game Filter</div>
+              <div class="srow-desc">Протокол для игрового трафика.</div>
+            </div>
+            <div class="srow-ctl">
+              <div class="seg sm" id="gameFilterSeg">
+                <div class="seg-btn" data-gf="off">выкл</div>
+                <div class="seg-btn" data-gf="tcp">TCP</div>
+                <div class="seg-btn" data-gf="udp">UDP</div>
+                <div class="seg-btn" data-gf="all">оба</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">IPSet Filter</div>
+              <div class="srow-desc">Список адресов, к которым применяется обход.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="srow-val" id="ipsetVal">—</span>
+              <button class="btn ghost xs" id="ipsetModeBtn">Сменить</button>
+            </div>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Свои списки доменов</div>
+              <div class="srow-desc">По домену в строке — дополнительный обход поверх IPSet.</div>
+            </div>
+            <div class="srow-ctl">
+              <button class="btn ghost xs" id="listsToggleBtn">Показать</button>
+              <button class="btn primary xs" id="saveListsBtn">Сохранить</button>
+            </div>
+          </div>
+          <div class="srow-expand hidden" id="listsEditor">
+            <div class="le-col">
+              <label>Дополнительно обходить</label>
+              <textarea id="includeListArea" class="code-area sm" placeholder="example.com" spellcheck="false"></textarea>
+            </div>
+            <div class="le-col">
+              <label>Никогда не трогать</label>
+              <textarea id="excludeListArea" class="code-area sm" placeholder="example.com" spellcheck="false"></textarea>
+            </div>
+            <p id="listsMsg" class="area-msg"></p>
+          </div>
+
+          <div class="srow">
+            <div class="srow-text">
+              <div class="srow-title">Автопроверка обновлений</div>
+              <div class="srow-desc">Проверять новые релизы ядра при запуске.</div>
+            </div>
+            <div class="srow-ctl">
+              <span class="toggle" id="autoUpdateToggle"><span class="knob"></span></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Обслуживание -->
+        <div class="card adv-only maint-card" id="settingsMaintCard">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Обслуживание</span>
+              <span class="ch-sub" id="maintReleaseSub">одноразовые действия, не настройки</span>
+            </div>
+          </div>
+
+          <div class="maint-tiles">
+            <button class="maint-tile" id="exportSettingsBtn">
+              <span class="mt-title">Экспорт настроек</span>
+              <span class="mt-desc">Уведомления, самолечение, автопрогон тестов, свои игровые адреса — в один файл.</span>
+            </button>
+            <button class="maint-tile" id="importSettingsBtn">
+              <span class="mt-title">Импорт настроек</span>
+              <span class="mt-desc">Применить настройки из ранее экспортированного файла.</span>
+            </button>
+            <button class="maint-tile" id="updateIpsetBtn">
+              <span class="mt-title">Обновить список IPSet</span>
+              <span class="mt-desc">Скачать актуальный список адресов.</span>
+            </button>
+            <button class="maint-tile" id="updateHostsBtn">
+              <span class="mt-title">Обновить hosts</span>
+              <span class="mt-desc">Сверить системный файл hosts с рекомендованным.</span>
+            </button>
+            <button class="maint-tile" id="changeReleaseBtn2">
+              <span class="mt-title">Сменить релиз</span>
+              <span class="mt-desc">Меняет бинарную версию ядра. При неудаче обход может перестать работать.</span>
+            </button>
+            <button class="maint-tile" id="clearDiscordBtn">
+              <span class="mt-title">Очистить кэш Discord</span>
+              <span class="mt-desc">Помогает, когда клиент кэширует сломанные ответы.</span>
+            </button>
+            <button class="maint-tile" id="checkUpdatesBtn">
+              <span class="mt-title">Проверить обновления Zapret</span>
+              <span class="mt-desc" id="releaseVersionLine">Проверить, вышла ли новая версия ядра.</span>
+            </button>
+            <button class="maint-tile" id="openReleaseFolderBtn">
+              <span class="mt-title">Папка релиза</span>
+              <span class="mt-desc">Открыть в проводнике — посмотреть логи или конфиги вручную.</span>
+            </button>
+          </div>
+
+          <div class="update-notes hidden" id="updateNotes">
+            <div class="update-notes-head">
+              <span class="update-notes-title">Что нового</span>
+              <button class="link-btn" id="openReleaseNotesBtn">Открыть на GitHub →</button>
+            </div>
+            <div class="update-notes-body" id="updateNotesBody"></div>
+          </div>
+
+          <div class="release-list" id="releaseList"></div>
+
+          <p id="maintenanceMsg" class="area-msg"></p>
+        </div>
+
+        <div class="page-foot">
+          Klutz · автор: vbu00 · дизайн: Medvedev Dmitriy
+          · <button class="link-btn" id="replayTourBtn">Показать подсказки по разделам</button>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script src="tauri-bridge.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>

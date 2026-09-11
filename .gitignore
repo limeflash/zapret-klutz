@@ -1,0 +1,14 @@
+# Зависимости и сборка
+node_modules/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Сборка TgWsProxy (tools/tgwsproxy-build/build.ps1)
+tools/tgwsproxy-build/venv/
+tools/tgwsproxy-build/build/
+tools/tgwsproxy-build/dist/
+tools/tgwsproxy-build/*.spec
+__pycache__/
+
+# Локальные настройки Claude Code
+.claude/settings.local.json

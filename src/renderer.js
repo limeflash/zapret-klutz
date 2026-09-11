@@ -1,0 +1,3132 @@
+// ═══════════════════════════════════════════════════════════════
+//  Klutz — renderer
+// ═══════════════════════════════════════════════════════════════
+
+const $ = (id) => document.getElementById(id);
+
+const shell = $('shell');
+const dropZone = $('dropZone');
+const loadError = $('loadError');
+
+let currentState = { rootPath: null, configs: [], activeConfig: null, running: false, monitor: null };
+// "Сменить релиз" only clears this local flag, not the backend's state.rootPath
+// (which still points at the working release in case the user backs out) — so
+// the periodic refreshState() poll below would otherwise restore the shell out
+// from under the onboarding screen a few seconds later. This guards against that.
+let choosingNewRelease = false;
+// Set by the setup wizard when the user picks "Telegram only" — unlocks the
+// shell (Telegram page specifically) without a zapret release loaded, since
+// TgWsProxy doesn't actually depend on one. Everything else in the shell
+// (Стратегии/Диагностика/Настройки) still assumes a release exists in a lot
+// of places that were never audited for a null rootPath, so those stay
+// gated on a real release regardless of this flag.
+let telegramOnlyMode = localStorage.getItem('zapretTelegramOnly') === '1';
+let lastServiceStatus = null;
+let lastCheck = null;
+let testing = false;
+// Автоподбор отработал, но связь после него так и не появилась — Главная
+// показывает это отдельным состоянием, пока пользователь что-то не поменяет.
+let pickFailed = false;
+let searchQuery = '';
+let groupFilter = null;
+
+// ─────────── Тема ───────────
+
+let theme = localStorage.getItem('zapretTheme') || 'light';
+
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('zapretTheme', theme);
+}
+
+$('themeBtn').onclick = () => {
+  theme = theme === 'dark' ? 'light' : 'dark';
+  applyTheme();
+};
+applyTheme();
+
+// ─────────── Кнопки окна ───────────
+
+$('winMinBtn').onclick = () => window.zapret.windowMinimize();
+$('winMaxBtn').onclick = () => window.zapret.windowToggleMaximize();
+$('winCloseBtn').onclick = () => window.zapret.windowClose();
+
+function setMaximized(on) {
+  document.body.classList.toggle('maximized', !!on);
+  $('winMaxBtn').title = on ? 'Свернуть в окно' : 'Развернуть';
+}
+window.zapret.onWindowMaximized(setMaximized);
+window.zapret.windowIsMaximized().then((r) => setMaximized(r.maximized));
+
+// ─────────── Тосты / подтверждение ───────────
+
+const toastContainer = $('toastContainer');
+
+const TOAST_ICONS = {
+  success: '<circle cx="8" cy="8" r="6.5"/><path d="M5.2 8.2l1.9 1.9 3.8-4"/>',
+  error: '<circle cx="8" cy="8" r="6.5"/><path d="M8 4.8v3.9"/><circle cx="8" cy="11.2" r=".6" fill="currentColor" stroke="none"/>',
+  warn: '<circle cx="8" cy="8" r="6.5"/><path d="M8 4.8v3.9"/><circle cx="8" cy="11.2" r=".6" fill="currentColor" stroke="none"/>',
+  info: '<circle cx="8" cy="8" r="6.5"/><path d="M8 7.3v3.9"/><circle cx="8" cy="4.9" r=".6" fill="currentColor" stroke="none"/>',
+};
+
+// opts: { body, actionLabel, onAction } — тело и кнопка необязательны.
+function showToast(title, type = 'info', opts = {}) {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `
+    <span class="toast-icon"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${
+      TOAST_ICONS[type] || TOAST_ICONS.info
+    }</svg></span>
+    <div class="toast-text">
+      <div class="toast-title">${esc(title)}</div>
+      ${opts.body ? `<div class="toast-body">${esc(opts.body)}</div>` : ''}
+    </div>
+    ${opts.actionLabel ? '<button class="toast-action"></button>' : ''}`;
+  if (opts.actionLabel) {
+    const btn = el.querySelector('.toast-action');
+    btn.textContent = opts.actionLabel;
+    btn.onclick = () => {
+      el.remove();
+      if (opts.onAction) opts.onAction();
+    };
+  }
+  toastContainer.appendChild(el);
+  setTimeout(() => {
+    el.style.transition = 'opacity .2s';
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 200);
+  }, 4200);
+}
+
+const confirmOverlay = $('confirmOverlay');
+
+function showConfirm(message) {
+  return new Promise((resolve) => {
+    $('confirmMessage').textContent = message;
+    confirmOverlay.classList.remove('hidden');
+    const done = (result) => {
+      confirmOverlay.classList.add('hidden');
+      $('confirmOkBtn').onclick = null;
+      $('confirmCancelBtn').onclick = null;
+      resolve(result);
+    };
+    $('confirmOkBtn').onclick = () => done(true);
+    $('confirmCancelBtn').onclick = () => done(false);
+  });
+}
+
+// ─────────── Утилиты ───────────
+
+function bareName(name) {
+  return name.replace(/\.bat$/i, '');
+}
+
+function displayName(name) {
+  return name ? prettyName(name) : '—';
+}
+
+// «general (FAKE TLS AUTO ALT3).bat» → «FAKE TLS AUTO ALT3»,
+// «general.bat» → «Базовый» — как подписи в макете.
+function prettyName(name) {
+  const base = bareName(name);
+  const m = base.match(/^general\s*\((.+)\)$/i);
+  if (m) return m[1].trim();
+  if (/^general$/i.test(base)) return 'Базовый';
+  return base;
+}
+
+function deriveGroup(name) {
+  const base = bareName(name);
+  const m = base.match(/^general\s*\((.+)\)$/i);
+  if (!m) return 'Базовый';
+  const content = m[1].trim();
+  if (/^ALT\d*$/i.test(content)) return 'ALT-варианты';
+  const stripped = content.replace(/\s*ALT\d*$/i, '').trim();
+  return stripped || content;
+}
+
+function formatUptime(startedAt) {
+  if (!startedAt) return '—';
+  const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h} ч ${m} мин`;
+  if (m > 0) return `${m} мин ${s} сек`;
+  return `${s} сек`;
+}
+
+function shortPath(p) {
+  if (!p) return '';
+  return p.length > 52 ? '…' + p.slice(-49) : p;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// ─────────── Режим и навигация ───────────
+
+// A telegram-only user has no release, so Home/Стратегии/Диагностика stay
+// hidden (see render()) — defaulting to 'home' would land them on a blank
+// page every single launch, not just the first one right after the wizard.
+let activePage = telegramOnlyMode ? 'telegram' : 'home';
+let activeSubtab = 'configs';
+
+// Простой режим — по умолчанию: Главная сводится к одной кнопке, Стратегии и
+// Диагностика скрыты целиком. Продвинутый включается в Настройках.
+let uiMode = localStorage.getItem('zapretUiMode') === 'advanced' ? 'advanced' : 'simple';
+const isAdvanced = () => uiMode === 'advanced';
+
+// Держится 700 мс после включения обхода — под него рисуется ударная волна
+// вокруг круглой кнопки.
+let launching = false;
+
+const sidebar = $('sidebar');
+
+if (localStorage.getItem('zapretSidebarCollapsed') === '1') sidebar.classList.add('collapsed');
+
+$('sidebarCollapseBtn').onclick = () => {
+  const collapsed = sidebar.classList.toggle('collapsed');
+  localStorage.setItem('zapretSidebarCollapsed', collapsed ? '1' : '0');
+};
+
+function switchPage(name) {
+  activePage = name;
+  render();
+  if (name === 'home') {
+    loadOverview();
+    ensureTargetsLoaded();
+  }
+  if (name === 'diagnostics') {
+    ensureTargetsLoaded();
+    loadGameTargetsArea();
+  }
+  if (name === 'telegram') {
+    loadTgwsproxyStatus();
+    loadTgwsproxyAutostart();
+    openTgwsproxySettings();
+  }
+  if (name === 'settings') {
+    loadToggles();
+    loadServiceStatus();
+    loadAutostart();
+    loadAutoSwitch();
+    loadAutoTestSchedule();
+    loadNotifications();
+    loadNotifySound();
+    loadCustomLists();
+    loadReleaseList();
+  }
+  if (name === 'strategies' && activeSubtab === 'tests') loadTestsHistory();
+}
+
+function switchSubtab(name) {
+  activeSubtab = name;
+  render();
+  if (name === 'tests') loadTestsHistory();
+}
+
+document.querySelectorAll('.nav-item[data-page]').forEach((el) => {
+  el.onclick = () => switchPage(el.dataset.page);
+});
+
+document.querySelectorAll('[data-subtab]').forEach((el) => {
+  el.onclick = () => {
+    switchPage('strategies');
+    switchSubtab(el.dataset.subtab);
+  };
+});
+
+document.querySelectorAll('.chip[data-goto]').forEach((el) => {
+  el.onclick = () => switchPage(el.dataset.goto);
+});
+
+$('homeGoTestsBtn').onclick = () => {
+  switchPage('strategies');
+  switchSubtab('tests');
+};
+
+// ─────────── Отрисовка каркаса ───────────
+
+function render() {
+  const hasRelease = !!currentState.rootPath;
+  // Telegram doesn't actually need a zapret release — telegramOnlyMode lets
+  // the setup wizard unlock just that one page without it. Everything else
+  // stays gated on a real release: too much of Стратегии/Диагностика/
+  // Настройки assumes one exists to safely open up without a proper audit.
+  const shellUnlocked = (hasRelease || telegramOnlyMode) && !choosingNewRelease;
+  dropZone.classList.toggle('hidden', shellUnlocked);
+  shell.classList.toggle('hidden', !shellUnlocked);
+
+  $('pageHome').classList.toggle('hidden', !hasRelease || activePage !== 'home');
+  $('pageStrategies').classList.toggle('hidden', !hasRelease || activePage !== 'strategies');
+  $('pageDiagnostics').classList.toggle('hidden', !hasRelease || activePage !== 'diagnostics');
+  $('pageTelegram').classList.toggle('hidden', !shellUnlocked || activePage !== 'telegram');
+  $('pageSettings').classList.toggle('hidden', !hasRelease || activePage !== 'settings');
+
+  // Стратегии и Диагностика существуют только в продвинутом режиме.
+  document.documentElement.classList.toggle('simple', !isAdvanced());
+  const ADV_ONLY_PAGES = ['strategies', 'diagnostics'];
+  document.querySelectorAll('.nav-item[data-page]').forEach((el) => {
+    const advGated = ADV_ONLY_PAGES.includes(el.dataset.page) && !isAdvanced();
+    el.classList.toggle('hidden', advGated || (el.dataset.page !== 'telegram' && !hasRelease));
+    el.classList.toggle('active', el.dataset.page === activePage);
+  });
+  document.querySelectorAll('[data-subtab]').forEach((el) =>
+    el.classList.toggle('active', el.dataset.subtab === activeSubtab && activePage === 'strategies')
+  );
+
+  $('paneConfigs').classList.toggle('hidden', activeSubtab !== 'configs');
+  $('paneTests').classList.toggle('hidden', activeSubtab !== 'tests');
+
+  renderStatusbar();
+  renderHero();
+  renderConfigList();
+  renderHomeFooter();
+}
+
+function renderStatusbar() {
+  const running = !!currentState.running;
+  $('statusbar').classList.toggle('running', running);
+  $('tbDot').classList.toggle('on', running);
+
+  $('statusText').textContent = running ? 'Работает' : 'Остановлен';
+  $('sbarSep1').classList.toggle('hidden', !running);
+  $('sbarName').textContent = running ? displayName(currentState.activeConfig) : '';
+  $('sbarUptime').textContent = running ? formatUptime(currentState.startedAt) : '';
+}
+
+function renderTgStatusbar(on) {
+  $('sbarTgDot').classList.toggle('on', on);
+  $('sbarTgText').classList.toggle('on', on);
+  $('sbarTgText').textContent = on ? 'Telegram-прокси' : 'Telegram-прокси выключен';
+}
+
+// Какие цели «ядровые» (Discord/YouTube) в последней проверке связи.
+function coreCheck() {
+  const src = lastCheck || currentState.monitor;
+  if (!src || !src.targets) return null;
+  const core = src.targets.filter((t) => CORE_RE.test(t.name));
+  if (!core.length) return null;
+  return { total: core.length, ok: core.filter((t) => t.ok).length, at: src.checkedAt, targets: core };
+}
+
+// Пять состояний, как в макете: подбираю → выключен → ничего не пробило →
+// работает частично → работает. Ровно один блок виден за раз.
+function renderHero() {
+  const running = !!(currentState.running && currentState.activeConfig);
+  // Как в макете: верим только проверке, сделанной после запуска текущего
+  // конфига. Старая, от прошлого варианта, иначе держала бы «Работает, но…»
+  // до следующей проверки.
+  const rawCheck = coreCheck();
+  const check =
+    rawCheck && (!currentState.startedAt || rawCheck.at >= currentState.startedAt) ? rawCheck : null;
+  const state = testing
+    ? 'picking'
+    : !running
+    ? 'idle'
+    : pickFailed
+    ? 'failed'
+    : check && check.ok < check.total
+    ? 'degraded'
+    : 'ok';
+
+  const adv = isAdvanced();
+  $('heroSimple').classList.toggle('hidden', adv);
+  $('heroPicking').classList.toggle('hidden', !adv || state !== 'picking');
+  $('heroIdle').classList.toggle('hidden', !adv || state !== 'idle');
+  $('heroFailed').classList.toggle('hidden', !adv || state !== 'failed');
+  $('heroDegraded').classList.toggle('hidden', !adv || state !== 'degraded');
+  $('heroActive').classList.toggle('hidden', !adv || state !== 'ok');
+  if (!adv) renderSimpleHero(state, check, running);
+
+  // "Что обходим" reflects reality regardless of idle/active — updated here
+  // (not just on click) so tray/self-heal/wizard changes show up too.
+  $('engineZapretToggle').classList.toggle('on', running);
+  $('engineZapretDot').className = 'status-dot' + (running ? ' ok' : '');
+
+  const variant = currentState.activeConfig || lastTestBest;
+  $('statVariant').textContent = variant ? displayName(variant) : 'не подобран';
+  $('statNow').textContent = running ? `${displayName(currentState.activeConfig)} — обход включён` : 'Discord и YouTube напрямую';
+  $('heroStartLabel').textContent = lastTestBest ? 'Включить' : 'Подобрать и включить';
+
+  if (state === 'ok') {
+    $('heroOkTitle').textContent = check && check.ok === check.total ? 'Discord и YouTube отвечают' : 'Обход включён';
+    $('heroName').textContent = displayName(currentState.activeConfig);
+    $('heroUptime').textContent = formatUptime(currentState.startedAt);
+    const when = check ? new Date(check.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : null;
+    $('heroHealth').textContent = check ? `${check.ok} из ${check.total} · проверено ${when}` : 'не проверялись';
+    $('heroHealth').classList.toggle('ok-val', !!check && check.ok === check.total);
+  }
+
+  if (state === 'degraded') {
+    const failing = [...new Set(check.targets.filter((t) => !t.ok).map((t) => t.name.split(' ')[0]))];
+    $('heroDegradedName').textContent = displayName(currentState.activeConfig);
+    $('heroDegradedTitle').textContent = failing.length
+      ? `Работает, но ${failing.join(' и ')} не ${failing.length > 1 ? 'отвечают' : 'отвечает'}`
+      : 'Работает, но не всё отвечает';
+    $('heroDegradedSub').textContent =
+      `Обход запущен, но ${check.ok} из ${check.total} целей отвечают. Это не ошибка приложения — ` +
+      'провайдер мог сменить блокировку. Обычно помогает другой вариант.';
+  }
+
+  if (state === 'failed') {
+    $('heroFailedSub').textContent =
+      `Сейчас включён лучший из проверенных — ${displayName(currentState.activeConfig)}, но Discord и YouTube ` +
+      'не отвечают. Иногда помогает соседний вариант или перезапуск через минуту.';
+    renderHeroAlternatives();
+  }
+}
+
+// Простой режим: одна кнопка и текст под ней вместо всей раскладки.
+// Состояния те же самые (picking/idle/failed/degraded/ok), просто показаны
+// одним блоком, а вокруг кнопки крутятся ореолы под текущее состояние.
+function renderSimpleHero(state, check, running) {
+  const activeName = displayName(currentState.activeConfig);
+  const live = running && state !== 'picking';
+
+  $('heroSimple').classList.toggle('ok', state === 'ok');
+
+  const circle = $('simpleCircle');
+  circle.classList.toggle('on', live);
+  circle.classList.toggle('ok', state === 'ok');
+  circle.title = running ? 'Остановить обход' : 'Включить обход';
+
+  // Ореолы — чистая декорация, пересобираем их целиком под состояние.
+  const halos = [];
+  if (live) {
+    halos.push('<span class="halo-glow"></span>', '<span class="halo-sweep"></span>');
+    halos.push('<span class="halo-ring"></span>', '<span class="halo-ring delayed"></span>');
+  }
+  if (launching) halos.push('<span class="halo-shock"></span>', '<span class="halo-shock fill"></span>');
+  if (state === 'picking') halos.push('<span class="halo-pick"></span>');
+  $('simpleHalo').innerHTML = halos.join('');
+
+  $('simpleHint').textContent =
+    state === 'picking' ? 'подбираю' : running ? 'нажмите, чтобы остановить' : 'нажмите, чтобы включить';
+
+  const failing = check ? [...new Set(check.targets.filter((t) => !t.ok).map((t) => t.name.split(' ')[0]))] : [];
+  $('simpleTitle').textContent =
+    state === 'picking'
+      ? 'Проверяю варианты обхода'
+      : state === 'ok'
+      ? check && check.ok === check.total
+        ? 'Discord и YouTube отвечают'
+        : 'Обход включён'
+      : state === 'failed'
+      ? 'Ни один вариант не пробил блокировку'
+      : state === 'degraded'
+      ? failing.length
+        ? `Работает, но ${failing.join(' и ')} не ${failing.length > 1 ? 'отвечают' : 'отвечает'}`
+        : 'Работает, но не всё отвечает'
+      : 'Обход выключен';
+
+  $('simpleSub').textContent =
+    state === 'picking'
+      ? $('heroPickStatus').textContent
+      : state === 'ok'
+      ? `${activeName} · работает ${formatUptime(currentState.startedAt)}`
+      : state === 'failed'
+      ? `Включён лучший из проверенных — ${activeName}, но Discord и YouTube не отвечают. ` +
+        'Прогоните тесты ещё раз или попробуйте другой вариант.'
+      : state === 'degraded'
+      ? `Включён ${activeName}, отвечают ${check.ok} из ${check.total} целей. Попробуйте подобрать другой вариант.`
+      : lastTestBest
+      ? `Включится последний рабочий вариант — ${displayName(lastTestBest)}. Пара секунд, без подбора.`
+      : 'Klutz проверит варианты обхода и включит тот, с которым Discord и YouTube откроются. Займёт пару минут.';
+
+  $('simpleProgress').classList.toggle('hidden', state !== 'picking');
+  $('simpleCancelWrap').classList.toggle('hidden', state !== 'picking');
+  $('simpleProgressFill').style.width = $('heroPickProgress').style.width || '0%';
+
+  const needsHelp = state === 'degraded' || state === 'failed';
+  $('simpleHelpActions').classList.toggle('hidden', !needsHelp);
+  if (!needsHelp) $('simpleAlts').classList.add('hidden');
+}
+
+// Соседние по рейтингу варианты — предлагаем вручную, когда автоподбор не помог.
+function renderHeroAlternatives() {
+  const rows = (lastResultsCache && lastResultsCache.rows) || [];
+  const alts = rows
+    .filter((r) => r.name !== currentState.activeConfig)
+    .slice(0, 3)
+    .map((r) => {
+      const score = verdictFor(r, lastResultsCache.mode).score;
+      return { name: r.name, desc: `${Math.round(score * 100)}% по последнему прогону` };
+    });
+  const box = $('heroAlts');
+  if (!alts.length) {
+    box.innerHTML = '<div class="hero-alt-desc">Прошлых результатов нет — прогони тесты, чтобы появились варианты.</div>';
+    return;
+  }
+  box.innerHTML = alts
+    .map(
+      (a, i) => `
+      <div class="hero-alt">
+        <div>
+          <div class="hero-alt-title">${esc(displayName(a.name))}</div>
+          <div class="hero-alt-desc">${esc(a.desc)}</div>
+        </div>
+        <button class="btn primary xs" data-alt="${i}">Включить</button>
+      </div>`
+    )
+    .join('');
+  box.querySelectorAll('button[data-alt]').forEach((btn) => {
+    btn.onclick = async () => {
+      const a = alts[Number(btn.dataset.alt)];
+      if (await applyConfig(a.name, false, true)) {
+        pickFailed = false;
+        await verifyAppliedAndToast(a.name);
+      }
+    };
+  });
+}
+
+function renderHomeFooter() {
+  const wd = lastServiceStatus && lastServiceStatus.windivertState === 'RUNNING' ? 'активен' : 'неактивен';
+  $('homeFooter').textContent =
+    `Ядро: winws.exe · WinDivert ${wd}`;
+  $('maintReleaseSub').textContent = currentState.rootPath
+    ? `Релиз: ${shortPath(currentState.rootPath)}`
+    : 'одноразовые действия, не настройки';
+  const release = currentState.rootPath ? currentState.rootPath.split(/[\\/]/).pop() : null;
+  $('sidebarVersionText').textContent = release ? `zapret ${release.replace(/^zapret[-\s]*/i, '')}` : 'zapret не загружен';
+  $('sidebarVersionSub').textContent = release
+    ? `${(currentState.configs || []).length} конфигов`
+    : 'релиз не выбран';
+  $('sidebarVersion').title = currentState.rootPath || 'Загруженный релиз zapret';
+  $('engineMenuSub').textContent = release || 'релиз не загружен';
+}
+
+setInterval(() => {
+  if (currentState.running) {
+    $('sbarUptime').textContent = formatUptime(currentState.startedAt);
+    if (activePage === 'home') $('heroUptime').textContent = formatUptime(currentState.startedAt);
+  }
+}, 1000);
+
+async function refreshState() {
+  currentState = await window.zapret.getState();
+  render();
+}
+
+// ─────────── Пуск / остановка ───────────
+
+async function stopActive() {
+  pickFailed = false;
+  if (currentState.installedAsService) {
+    const ok = await showConfirm('Стратегия установлена как служба. Снять службу и остановить?');
+    if (!ok) return;
+    await window.zapret.removeService();
+    loadServiceStatus();
+  } else {
+    await window.zapret.stopConfig();
+  }
+  showToast('Обход остановлен', 'success');
+  refreshState();
+}
+
+$('heroStopBtn').onclick = stopActive;
+// Обход включён и в «Работает, но…», и после неудачного подбора — остановить
+// его должно быть можно из любого состояния, не только из «всё отвечает».
+$('heroDegradedStopBtn').onclick = stopActive;
+$('heroFailedStopBtn').onclick = stopActive;
+
+// silent: skip the generic success toast — used by the auto-pick flow, which
+// shows a more specific one after actually checking whether it worked.
+async function applyConfig(name, asService, silent) {
+  const res = asService ? await window.zapret.installService(name) : await window.zapret.runConfig(name);
+  if (!res.ok) {
+    showToast(res.error || 'Не удалось запустить', 'error');
+    return false;
+  }
+  if (!silent) showToast(`${asService ? 'Установлено службой' : 'Запущено'}: ${displayName(name)}`, 'success');
+  await refreshState();
+  return true;
+}
+
+$('heroStartBtn').onclick = async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  const res = await window.zapret.getLastTestResults();
+  const best = res.ok ? parseResults(res.text).best : null;
+  if (best) {
+    const applied = await applyConfig(best, false, true);
+    btn.disabled = false;
+    if (applied) await verifyAppliedAndToast(best);
+    return;
+  }
+  btn.disabled = false;
+  // Рейтинга ещё нет — прогоняем тесты и включаем лучшую.
+  runAllTests({ autoApply: true, btn });
+};
+
+$('heroRedoBtn').onclick = (e) => runAllTests({ autoApply: true, btn: e.currentTarget });
+
+$('heroCancelBtn').onclick = () => window.zapret.stopTests();
+$('heroDegradedPickBtn').onclick = () => runAllTests({ autoApply: true });
+$('heroFailedRetryBtn').onclick = () => runAllTests({ autoApply: true });
+$('heroDegradedDiagBtn').onclick = () => switchPage('diagnostics');
+$('heroFailedDiagBtn').onclick = () => switchPage('diagnostics');
+$('heroAltBtn').onclick = () => {
+  const open = $('heroAlts').classList.toggle('hidden');
+  $('heroAltBtn').textContent = open ? 'Попробовать вручную' : 'Скрыть варианты';
+};
+
+// ─────────── Простой режим ───────────
+
+// Одна кнопка на все случаи: работает — остановить, есть рабочий вариант —
+// включить его сразу, нет — подобрать. Во время подбора клик игнорируется.
+$('simpleCircle').onclick = () => {
+  if (testing || launching) return;
+  if (currentState.running) stopActive();
+  else if (lastTestBest) applyBestFromSimple();
+  else runAllTests({ autoApply: true });
+};
+
+async function applyBestFromSimple() {
+  launching = true;
+  renderHero();
+  setTimeout(() => {
+    launching = false;
+    renderHero();
+  }, 700);
+  if (await applyConfig(lastTestBest, false, true)) await verifyAppliedAndToast(lastTestBest);
+}
+
+$('simpleCancelBtn').onclick = () => window.zapret.stopTests();
+$('simplePickBtn').onclick = () => runAllTests({ autoApply: true });
+$('simpleAltBtn').onclick = () => {
+  const hidden = $('simpleAlts').classList.contains('hidden');
+  if (hidden) renderSimpleAlternatives();
+  $('simpleAlts').classList.toggle('hidden', !hidden);
+  $('simpleAltBtn').textContent = hidden ? 'Скрыть варианты' : 'Выбрать другой вариант';
+};
+
+function renderSimpleAlternatives() {
+  renderHeroAlternatives();
+  $('simpleAlts').innerHTML = $('heroAlts').innerHTML;
+  $('simpleAlts')
+    .querySelectorAll('button[data-alt]')
+    .forEach((btn) => {
+      btn.onclick = () => $('heroAlts').querySelector(`button[data-alt="${btn.dataset.alt}"]`).click();
+    });
+}
+
+// ─────────── Режим простой / продвинутый ───────────
+
+const advancedToggle = $('advancedToggle');
+
+function applyUiMode() {
+  advancedToggle.classList.toggle('on', isAdvanced());
+  localStorage.setItem('zapretUiMode', uiMode);
+  // Из простого режима страницы Стратегии/Диагностика недоступны — если мы
+  // на одной из них, уводим на Главную, иначе экран останется пустым.
+  if (!isAdvanced() && ['strategies', 'diagnostics'].includes(activePage)) activePage = 'home';
+  render();
+}
+
+advancedToggle.onclick = () => {
+  uiMode = isAdvanced() ? 'simple' : 'advanced';
+  applyUiMode();
+  showToast(isAdvanced() ? 'Продвинутый режим включён' : 'Простой режим включён', 'success');
+};
+
+// ─────────── О программе ───────────
+
+const aboutOverlay = $('aboutOverlay');
+
+// Версия Klutz приходит из сборки (tauri.conf.json), а не зашита в HTML —
+// иначе титулбар, «О программе» и установщик рано или поздно разойдутся.
+function fillVersions(v) {
+  $('tbVersion').textContent = v.app;
+  $('aboutAppVersion').textContent = v.app;
+  const z = $('aboutZapretVer');
+  z.textContent = v.zapret || 'не загружен';
+  z.className = '';
+  const t = $('aboutTgwsVer');
+  t.textContent = v.tgws;
+  t.className = '';
+}
+window.zapret.getVersions().then(fillVersions);
+
+$('aboutBtn').onclick = async () => {
+  closeMenus();
+  $('aboutUpdateNote').classList.add('hidden');
+  aboutOverlay.classList.remove('hidden');
+  // Релиз zapret могли сменить с прошлого открытия — перечитываем.
+  fillVersions(await window.zapret.getVersions());
+};
+aboutOverlay.onclick = (e) => {
+  if (e.target === aboutOverlay) aboutOverlay.classList.add('hidden');
+};
+$('aboutGithubBtn').onclick = () => window.zapret.openExternalUrl('https://github.com/Flowseal/zapret-discord-youtube');
+$('aboutReportBtn').onclick = () => window.zapret.openExternalUrl('https://github.com/Flowseal/zapret-discord-youtube/issues');
+// Сверяет обе части — zapret-discord-youtube и встроенный TgWsProxy — с
+// последними версиями у Flowseal, результат прямо в строках окна.
+$('aboutUpdateBtn').onclick = async () => {
+  const btn = $('aboutUpdateBtn');
+  btn.disabled = true;
+  btn.textContent = 'Проверяю…';
+  const res = await window.zapret.checkComponentUpdates();
+  btn.disabled = false;
+  btn.textContent = 'Проверить обновления';
+
+  const norm = (v) => String(v || '').trim().replace(/^v/i, '').toLowerCase();
+  const show = (el, u) => {
+    el.className = '';
+    if (!u.current) {
+      el.textContent = 'не загружен';
+    } else if (!u.latest) {
+      el.textContent = `${u.current} · не удалось проверить`;
+    } else if (norm(u.latest) === norm(u.current)) {
+      el.textContent = `${u.current} · актуальная`;
+      el.className = 'fresh';
+    } else {
+      el.textContent = `${u.current} → есть ${u.latest}`;
+      el.className = 'upd';
+    }
+  };
+  show($('aboutZapretVer'), res.zapret);
+  show($('aboutTgwsVer'), res.tgws);
+
+  const newer = (u) => u.current && u.latest && norm(u.latest) !== norm(u.current);
+  const note = $('aboutUpdateNote');
+  const parts = [];
+  if (newer(res.zapret)) parts.push('<button class="link-btn" id="aboutGoUpdateZapret">Обновить zapret в Настройках →</button>');
+  if (newer(res.tgws)) parts.push('<span>Новый TgWsProxy придёт с обновлением Klutz — он встроен в приложение.</span>');
+  if (!newer(res.zapret) && !newer(res.tgws) && res.zapret.latest && res.tgws.latest) parts.push('<span>Всё актуально.</span>');
+  note.innerHTML = parts.join('<br>');
+  note.classList.toggle('hidden', !parts.length);
+  const go = $('aboutGoUpdateZapret');
+  if (go) {
+    go.onclick = () => {
+      aboutOverlay.classList.add('hidden');
+      switchPage('settings');
+      scrollToCard('settingsMaintCard');
+      $('checkUpdatesBtn').click();
+    };
+  }
+};
+
+// ─────────── Главная: «Что обходим» и карточки автоматизации ───────────
+// These proxy the real controls elsewhere (Стратегии, Telegram, Настройки)
+// instead of duplicating their logic — clicking here just drives the same
+// handler, so there's exactly one place that owns each action.
+
+$('engineZapretToggle').onclick = async () => {
+  if (currentState.running) await stopActive();
+  else $('heroStartBtn').click();
+};
+$('engineZapretLink').onclick = () => {
+  switchPage('strategies');
+  switchSubtab('configs');
+};
+
+$('engineTgLink').onclick = () => switchPage('telegram');
+// tgwsproxyToggle's own handler already refreshes this card via
+// loadTgwsproxyStatus() at the end — nothing else to do here.
+$('engineTgToggle').onclick = () => tgwsproxyToggle.onclick();
+
+$('homeAutostartToggle').onclick = async () => {
+  await autostartToggle.onclick();
+  $('homeAutostartToggle').classList.toggle('on', autostartToggle.classList.contains('on'));
+};
+$('homeAutoSwitchToggle').onclick = async () => {
+  await autoSwitchToggle.onclick();
+  $('homeAutoSwitchToggle').classList.toggle('on', autoSwitchToggle.classList.contains('on'));
+};
+
+// ─────────── Список конфигов ───────────
+
+const configListEl = $('configList');
+
+$('configSearch').oninput = (e) => {
+  searchQuery = e.target.value;
+  renderConfigList();
+};
+
+function closeMenus() {
+  document.querySelectorAll('.menu').forEach((m) => m.remove());
+  $('engineMenu').classList.add('hidden');
+}
+document.addEventListener('click', (e) => {
+  if (
+    !e.target.closest('.menu') &&
+    !e.target.closest('.cfg-more') &&
+    !e.target.closest('.game-select-panel') &&
+    !e.target.closest('.game-select-btn') &&
+    !e.target.closest('.engine-menu') &&
+    !e.target.closest('.sb-version')
+  ) {
+    closeMenus();
+  }
+});
+
+// Строка версии в сайдбаре открывает меню релиза — те же действия, что и в
+// «Обслуживании», просто под рукой.
+$('sidebarVersion').onclick = () => {
+  const menu = $('engineMenu');
+  if (!menu.classList.contains('hidden')) {
+    menu.classList.add('hidden');
+    return;
+  }
+  closeMenus();
+  const r = $('sidebarVersion').getBoundingClientRect();
+  menu.classList.remove('hidden');
+  menu.style.left = `${r.left}px`;
+  menu.style.bottom = `${window.innerHeight - r.top + 6}px`;
+};
+$('engineCheckUpdateBtn').onclick = () => {
+  closeMenus();
+  switchPage('settings');
+  scrollToCard('settingsMaintCard');
+  $('checkUpdatesBtn').click();
+};
+$('engineChangeBtn').onclick = () => {
+  closeMenus();
+  $('changeReleaseBtn2').click();
+};
+$('engineOpenFolderBtn').onclick = () => {
+  closeMenus();
+  $('openReleaseFolderBtn').click();
+};
+
+// Scrolls a card into view inside .content and flashes a highlight ring —
+// same "jump to the thing I'm talking about" pattern for cross-page links.
+function scrollToCard(id) {
+  setTimeout(() => {
+    const el = $(id);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.remove('jump-highlight');
+    void el.offsetWidth; // restart the animation if it's already mid-flash
+    el.classList.add('jump-highlight');
+    setTimeout(() => el.classList.remove('jump-highlight'), 1800);
+  }, 60);
+}
+
+document.querySelectorAll('.settings-anchor[data-jump]').forEach((el) => {
+  el.onclick = () => scrollToCard(el.dataset.jump);
+});
+
+function openRowMenu(anchor, name, isActive) {
+  closeMenus();
+  const menu = document.createElement('div');
+  menu.className = 'menu';
+
+  const items = [];
+  if (!isActive) {
+    items.push({ label: 'Запустить разово', fn: () => applyConfig(name, false) });
+    items.push({ label: 'Установить службой', fn: () => applyConfig(name, true) });
+  } else {
+    if (!currentState.installedAsService) {
+      items.push({ label: 'Перевести в службу', fn: () => applyConfig(name, true) });
+    }
+    items.push({ label: 'Остановить', danger: true, fn: stopActive });
+  }
+
+  for (const it of items) {
+    const el = document.createElement('div');
+    el.className = 'menu-item' + (it.danger ? ' danger' : '');
+    el.textContent = it.label;
+    el.onclick = () => {
+      closeMenus();
+      it.fn();
+    };
+    menu.appendChild(el);
+  }
+
+  document.body.appendChild(menu);
+  const r = anchor.getBoundingClientRect();
+  const h = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, r.right - menu.offsetWidth)}px`;
+  menu.style.top = `${r.bottom + h + 8 > window.innerHeight ? r.top - h - 6 : r.bottom + 6}px`;
+}
+
+function renderConfigList() {
+  if (!currentState.configs.length) {
+    configListEl.innerHTML = '';
+    $('groupChips').innerHTML = '';
+    return;
+  }
+
+  renderGroupChips();
+
+  const q = searchQuery.trim().toLowerCase();
+  const filtered = currentState.configs.filter((n) => prettyName(n).toLowerCase().includes(q));
+
+  if (!filtered.length) {
+    configListEl.innerHTML = '<div class="no-results">Ничего не найдено</div>';
+    return;
+  }
+
+  const groups = new Map();
+  for (const name of filtered) {
+    const g = deriveGroup(name);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(name);
+  }
+
+  configListEl.innerHTML = '';
+
+  for (const [group, names] of groups) {
+    if (groupFilter && group !== groupFilter) continue;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'cfg-group';
+
+    // Группы больше не сворачиваются — фильтр делают чипы сверху.
+    const head = document.createElement('div');
+    head.className = 'cfg-group-head';
+    head.innerHTML = `
+      <span class="cgh-name">${esc(group)}</span>
+      <span class="cgh-rule"></span>
+      <span class="cgh-count">${names.length} ${plural(names.length, 'конфиг', 'конфига', 'конфигов')}</span>`;
+    wrap.appendChild(head);
+
+    {
+      for (const name of names) {
+        const isActive = currentState.activeConfig === name && currentState.running;
+        const row = document.createElement('div');
+        row.className = 'cfg-row' + (isActive ? ' active' : '');
+
+        const tag = isActive
+          ? currentState.installedAsService
+            ? 'служба Windows'
+            : 'запущен разово'
+          : 'не активен';
+
+        const testedRow = lastResultsCache?.rows.find((r) => r.config === name);
+        const verdictBadge = testedRow
+          ? (() => {
+              const score = verdictFor(testedRow, lastResultsCache.mode).score;
+              return `<span class="cfg-tag" style="color:${verdictColor(score)}" title="Доля проверенных целей, которые ответили">${Math.round(score * 100)}%</span>`;
+            })()
+          : '';
+
+        row.innerHTML = `
+          <div class="cfg-main">
+            <div class="cfg-title-row">
+              <span class="cfg-name">${esc(displayName(name))}</span>
+              <span class="cfg-tag${isActive ? ' on' : ''}">${tag}</span>
+              ${verdictBadge}
+            </div>
+            <div class="cfg-desc">${esc(name)}</div>
+          </div>
+          <div class="cfg-actions">
+            <button class="cfg-btn${isActive ? ' on' : ''}" ${isActive ? 'disabled' : ''}>${isActive ? 'Активен' : 'Применить'}</button>
+            <button class="cfg-more" title="Ещё">⋯</button>
+          </div>`;
+
+        const btn = row.querySelector('.cfg-btn');
+        if (!isActive) {
+          btn.disabled = testing;
+          btn.onclick = async () => {
+            btn.disabled = true;
+            await applyConfig(name, false);
+            btn.disabled = false;
+          };
+        }
+        row.querySelector('.cfg-more').onclick = (e) => {
+          e.stopPropagation();
+          openRowMenu(e.currentTarget, name, isActive);
+        };
+
+        wrap.appendChild(row);
+      }
+    }
+
+    configListEl.appendChild(wrap);
+  }
+}
+
+function plural(n, one, few, many) {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}
+
+// Ряд чипов-фильтров по семействам конфигов — как в макете, вместо кнопки,
+// перебирающей группы по кругу без обратной связи, какая выбрана.
+function renderGroupChips() {
+  const counts = new Map();
+  for (const name of currentState.configs) {
+    const g = deriveGroup(name);
+    counts.set(g, (counts.get(g) || 0) + 1);
+  }
+  const chips = [{ label: 'Все', value: null }, ...[...counts.entries()].map(([g, n]) => ({ label: `${g} · ${n}`, value: g }))];
+  $('groupChips').innerHTML = chips
+    .map((c) => `<div class="group-chip${c.value === groupFilter ? ' active' : ''}" data-g="${esc(c.value || '')}">${esc(c.label)}</div>`)
+    .join('');
+  $('groupChips')
+    .querySelectorAll('.group-chip')
+    .forEach((el) => {
+      el.onclick = () => {
+        groupFilter = el.dataset.g || null;
+        renderConfigList();
+      };
+    });
+}
+
+// ─────────── Цели: главная и диагностика ───────────
+
+// Discord/YouTube — «цели обхода», всё прочее — игровые сервисы.
+const CORE_RE = /^(discord|youtube)/i;
+
+let knownTargets = [];
+let targetsLoaded = false;
+let autoCheckTimer = null;
+
+function verdict(t) {
+  if (t.pending) return { cls: 'idle', text: '…' };
+  if (!t.ok) return { cls: 'bad', text: 'Нет связи' };
+  if (t.ms >= 500) return { cls: 'warn', text: 'Медленно' };
+  return { cls: '', text: 'ОК' };
+}
+
+function targetRow(t) {
+  const v = verdict(t);
+  const sub = `${t.host}:${t.port}`;
+  return `
+    <div class="trow">
+      <div class="tr-name">
+        <span class="tr-dot ${v.cls}"></span><span>${esc(t.name)}</span>
+      </div>
+      <div class="tr-host">${esc(sub)}</div>
+      <div class="tr-ms">${t.pending ? '—' : t.ok ? t.ms + ' ms' : '—'}</div>
+      <div class="tr-verdict ${v.cls}">${v.text}</div>
+    </div>`;
+}
+
+function pingCard(t) {
+  const v = verdict(t);
+  return `
+    <div class="ping-card">
+      <div class="pc-top">
+        <span class="pc-name">${esc(t.name)}</span>
+        <span class="pc-dot ${v.cls}"></span>
+      </div>
+      <div class="pc-val">
+        <span class="pc-num ${v.cls}">${t.pending ? '…' : t.ok ? t.ms : 'нет'}</span>
+        ${t.ok && !t.pending ? '<span class="pc-unit">ms</span>' : ''}
+      </div>
+      <div class="pc-host">${esc(t.host)}</div>
+    </div>`;
+}
+
+function renderTargets(data) {
+  const core = data.targets.filter((t) => CORE_RE.test(t.name));
+  const games = data.targets.filter((t) => !CORE_RE.test(t.name));
+
+  $('diagCoreRows').innerHTML = core.map(targetRow).join('');
+  $('diagGameGrid').innerHTML = games.map(pingCard).join('');
+
+  const coreOk = core.filter((t) => t.ok).length;
+  const summary = core.length ? `${coreOk} из ${core.length} целей отвечают` : 'нет целей';
+  $('diagCoreSummary').textContent = data.pending ? 'проверяю…' : summary;
+
+  // Карточки «Здоровье связи» на Главной больше нет — состояние целей несут
+  // сам герой (заголовок в простом режиме, строка «Цели» в продвинутом).
+  if (!data.pending) {
+    const when = new Date(data.checkedAt).toLocaleTimeString('ru-RU');
+    const strat = data.running && data.strategy ? displayName(data.strategy) : null;
+    $('gamesContext').textContent = strat
+      ? `${when} · активна ${strat}`
+      : `${when} · стратегия не запущена`;
+  }
+
+  // Custom-address rows show live ping status from this same check.
+  if (knownTargets.length) renderCustomAddressList();
+}
+
+async function checkTargets() {
+  const btns = [$('checkGamesBtn')];
+  btns.forEach((b) => (b.disabled = true));
+  if (knownTargets.length) {
+    renderTargets({ targets: knownTargets.map((t) => ({ ...t, pending: true })), pending: true, checkedAt: Date.now() });
+  }
+  const data = await window.zapret.checkGames();
+  btns.forEach((b) => (b.disabled = false));
+  if (data.ok) {
+    lastCheck = data;
+    renderTargets(data);
+    if (activePage === 'home') loadOverview();
+  }
+  return data.ok ? data : null;
+}
+
+$('checkGamesBtn').onclick = checkTargets;
+
+// После автопримения стратегии — реально проверяем, отвечают ли Discord и
+// YouTube, вместо того чтобы слепо считать запуск успехом.
+async function verifyAppliedAndToast(name) {
+  const data = await checkTargets();
+  const core = data ? data.targets.filter((t) => CORE_RE.test(t.name)) : [];
+  const okCore = core.filter((t) => t.ok).length;
+  pickFailed = core.length > 0 && okCore === 0;
+  if (pickFailed) {
+    showToast(`Включено: ${displayName(name)} — но Discord и YouTube не отвечают`, 'error');
+  } else if (core.length && okCore < core.length) {
+    showToast(`Включено: ${displayName(name)} — отвечают не все цели`, 'success');
+  } else {
+    showToast(`Включено: ${displayName(name)} — Discord и YouTube отвечают`, 'success');
+  }
+  renderHero();
+}
+
+async function ensureTargetsLoaded() {
+  if (targetsLoaded) return;
+  targetsLoaded = true;
+  const res = await window.zapret.getGameTargets();
+  knownTargets = res.targets || [];
+  checkTargets();
+}
+
+const autoCheckToggle = $('autoCheckToggle');
+autoCheckToggle.onclick = () => {
+  const on = autoCheckToggle.classList.toggle('on');
+  if (autoCheckTimer) {
+    clearInterval(autoCheckTimer);
+    autoCheckTimer = null;
+  }
+  if (on) {
+    autoCheckTimer = setInterval(() => {
+      if (activePage === 'diagnostics' || activePage === 'home') checkTargets();
+    }, 60000);
+  }
+};
+
+// ─────────── Свои адреса ───────────
+
+let defaultGameTargets = [];
+window.zapret.getDefaultGameTargets().then((res) => {
+  defaultGameTargets = res.targets || [];
+});
+function isDefaultTarget(t) {
+  return defaultGameTargets.some((d) => d.name === t.name && d.host === t.host && d.port === t.port);
+}
+
+async function loadGameTargetsArea() {
+  const res = await window.zapret.getGameTargets();
+  knownTargets = res.targets || [];
+  renderCustomAddressList();
+}
+
+// Reuses whatever the last real ping check found for this exact host:port —
+// no separate round trip just to colour the list.
+function liveVerdictFor(t) {
+  const live = lastCheck?.targets?.find((x) => x.host === t.host && x.port === t.port);
+  return live ? { ...verdict(live), ms: live.ok ? live.ms + ' ms' : '—' } : { cls: 'idle', text: '—', ms: '—' };
+}
+
+// Показывает только реально добавленные пользователем адреса — стандартные
+// уже видны выше, в «Целях обхода» и «Игровых сервисах», повторять их здесь
+// смысла нет.
+function renderCustomAddressList() {
+  const custom = knownTargets.filter((t) => !isDefaultTarget(t));
+  $('customAddressesCount').textContent = `${custom.length} ${plural(custom.length, 'адрес', 'адреса', 'адресов')}`;
+
+  const box = $('customAddressList');
+  if (!custom.length) {
+    box.innerHTML = '<div class="no-results">Своих адресов пока нет — стандартные видны выше</div>';
+    return;
+  }
+
+  box.innerHTML = custom
+    .map((t) => {
+      const v = liveVerdictFor(t);
+      return `
+        <div class="addr-row">
+          <div class="addr-main">
+            <span class="tr-dot ${v.cls}"></span>
+            <span class="addr-name">${esc(t.name)}</span>
+          </div>
+          <div class="addr-host">${esc(t.host)}:${t.port}</div>
+          <div class="addr-ms">${esc(v.ms)}</div>
+          <div class="addr-verdict ${v.cls}">${esc(v.text)}</div>
+          <div class="addr-remove"><button class="addr-remove-btn" data-remove="${esc(t.host)}:${t.port}" title="Удалить">✕</button></div>
+        </div>`;
+    })
+    .join('');
+
+  box.querySelectorAll('[data-remove]').forEach((btn) => {
+    btn.onclick = async () => {
+      const key = btn.dataset.remove;
+      const before = knownTargets;
+      const next = knownTargets.filter((t) => `${t.host}:${t.port}` !== key);
+      const res = await window.zapret.saveGameTargets(next);
+      if (!res.ok) {
+        showToast(res.error || 'Не удалось сохранить', 'error');
+        return;
+      }
+      knownTargets = res.targets;
+      renderCustomAddressList();
+      checkTargets();
+      showToast('Адрес удалён', 'success', {
+        actionLabel: 'Отменить',
+        onAction: async () => {
+          const undoRes = await window.zapret.saveGameTargets(before);
+          if (undoRes.ok) {
+            knownTargets = undoRes.targets;
+            renderCustomAddressList();
+            checkTargets();
+          }
+        },
+      });
+    };
+  });
+}
+
+// ─────────── Командная палитра «добавить адрес» (Ctrl+K) ───────────
+
+const CATALOG = [
+  { g: 'Игры', name: 'Rocket League', host: 'api.rlpp.psynet.gg', port: 443 },
+  { g: 'Игры', name: 'Fortnite', host: 'fortnite-public-service-prod11.ol.epicgames.com', port: 443 },
+  { g: 'Игры', name: 'Valorant', host: 'glz-ru-1.ru.a.pvp.net', port: 443 },
+  { g: 'Игры', name: 'League of Legends', host: 'euw.api.riotgames.com', port: 443 },
+  { g: 'Игры', name: 'Apex Legends', host: 'r5-crossplay.r5prod.stryder.respawn.com', port: 443 },
+  { g: 'Игры', name: 'Roblox', host: 'apis.roblox.com', port: 443 },
+  { g: 'Игры', name: 'Minecraft', host: 'sessionserver.mojang.com', port: 443 },
+  { g: 'Игры', name: 'Genshin Impact', host: 'sdk-os-static.hoyoverse.com', port: 443 },
+  { g: 'Игры', name: 'Overwatch 2', host: 'eu.actual.battle.net', port: 1119 },
+  { g: 'Игры', name: 'Counter-Strike 2', host: 'cm.steampowered.com', port: 27017 },
+  { g: 'Игры', name: 'Dota 2', host: 'api.steampowered.com', port: 443 },
+  { g: 'Игры', name: 'Warframe', host: 'api.warframe.com', port: 443 },
+  { g: 'Игры', name: 'Destiny 2', host: 'www.bungie.net', port: 443 },
+  { g: 'Игры', name: 'War Thunder', host: 'login.gaijin.net', port: 443 },
+  { g: 'Платформы', name: 'Steam', host: 'api.steampowered.com', port: 443 },
+  { g: 'Платформы', name: 'Epic Online', host: 'api.epicgames.dev', port: 443 },
+  { g: 'Платформы', name: 'Riot', host: 'auth.riotgames.com', port: 443 },
+  { g: 'Платформы', name: 'Battle.net', host: 'us.actual.battle.net', port: 1119 },
+  { g: 'Платформы', name: 'Xbox Live', host: 'title.mgt.xboxlive.com', port: 443 },
+  { g: 'Платформы', name: 'PlayStation Network', host: 'auth.api.sonyentertainmentnetwork.com', port: 443 },
+  { g: 'Платформы', name: 'EA App', host: 'accounts.ea.com', port: 443 },
+  { g: 'Платформы', name: 'Ubisoft Connect', host: 'public-ubiservices.ubi.com', port: 443 },
+  { g: 'Сервисы', name: 'Twitch', host: 'gql.twitch.tv', port: 443 },
+  { g: 'Сервисы', name: 'Instagram', host: 'i.instagram.com', port: 443 },
+  { g: 'Сервисы', name: 'Spotify', host: 'api.spotify.com', port: 443 },
+  { g: 'Сервисы', name: 'SoundCloud', host: 'api-v2.soundcloud.com', port: 443 },
+  { g: 'Сервисы', name: 'Cloudflare 1.1.1.1', host: 'one.one.one.one', port: 443 },
+  { g: 'Сервисы', name: 'GitHub', host: 'api.github.com', port: 443 },
+  { g: 'Сервисы', name: 'ChatGPT', host: 'chatgpt.com', port: 443 },
+  { g: 'Сервисы', name: 'Notion', host: 'www.notion.so', port: 443 },
+];
+
+let cmdItems = [];
+let cmdIdx = 0;
+
+// Принимает и «host:port», и полноценный URL — имя предлагает по домену.
+function parseTarget(raw) {
+  const s = (raw || '').trim();
+  if (!s) return null;
+  let host;
+  let port;
+  try {
+    const u = new URL(/^[a-z]+:\/\//i.test(s) ? s : `https://${s}`);
+    host = u.hostname;
+    port = Number(u.port) || (u.protocol === 'http:' ? 80 : 443);
+  } catch {
+    return null;
+  }
+  if (!host || !host.includes('.')) return null;
+  const label = host.replace(/^(www|api|auth|cdn|gateway)\./, '').split('.').slice(0, -1).join('.') || host;
+  return { host, port, suggested: label.charAt(0).toUpperCase() + label.slice(1) };
+}
+
+function buildCmdItems(query) {
+  const q = query.trim().toLowerCase();
+  const have = new Set(knownTargets.map((t) => `${t.host}:${t.port}`));
+  const list = CATALOG.filter((c) => !q || c.name.toLowerCase().includes(q) || c.host.includes(q)).map((c) => ({
+    ...c,
+    added: have.has(`${c.host}:${c.port}`),
+  }));
+  const p = q ? parseTarget(query) : null;
+  if (p && !list.some((c) => c.host === p.host && c.port === p.port)) {
+    list.push({
+      g: 'Свой адрес',
+      name: query.trim(),
+      host: p.host,
+      port: p.port,
+      custom: true,
+      suggested: p.suggested,
+      added: have.has(`${p.host}:${p.port}`),
+    });
+  }
+  return list;
+}
+
+function renderCmdList() {
+  const box = $('cmdList');
+  if (!cmdItems.length) {
+    box.innerHTML =
+      '<div class="cmd-empty">Ничего не нашёл. Вставь адрес вида <span class="mono">host:port</span> или ссылку — добавлю как свой.</div>';
+    return;
+  }
+  const groups = new Map();
+  cmdItems.forEach((it, i) => {
+    if (!groups.has(it.g)) groups.set(it.g, []);
+    groups.get(it.g).push({ it, i });
+  });
+  box.innerHTML = [...groups.entries()]
+    .map(
+      ([label, items]) => `
+      <div class="cmd-group">${esc(label)}</div>
+      ${items
+        .map(
+          ({ it, i }) => `
+        <div class="cmd-item${i === cmdIdx ? ' active' : ''}" data-i="${i}">
+          <span class="cmd-initial">${esc((it.custom ? it.suggested : it.name).charAt(0).toUpperCase())}</span>
+          <div class="cmd-item-text">
+            <div class="cmd-item-name">${esc(it.custom ? it.suggested : it.name)}</div>
+            <div class="cmd-item-host">${esc(it.host)}:${it.port}</div>
+          </div>
+          <span class="cmd-tag">${it.added ? 'уже есть' : it.custom ? 'свой' : ''}</span>
+        </div>`
+        )
+        .join('')}`
+    )
+    .join('');
+  box.querySelectorAll('.cmd-item').forEach((el) => {
+    el.onmouseenter = () => {
+      cmdIdx = Number(el.dataset.i);
+      box.querySelectorAll('.cmd-item').forEach((o) => o.classList.toggle('active', o === el));
+    };
+    el.onclick = () => cmdPick(cmdItems[Number(el.dataset.i)]);
+  });
+  const active = box.querySelector('.cmd-item.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+async function cmdPick(it) {
+  if (!it) return;
+  if (it.added) {
+    showToast(`${it.custom ? it.suggested : it.name} уже в списке`, 'warn');
+    return;
+  }
+  const name = it.custom ? it.suggested : it.name;
+  const res = await window.zapret.saveGameTargets([...knownTargets, { name, host: it.host, port: it.port }]);
+  if (!res.ok) {
+    showToast(res.error || 'Не удалось сохранить', 'error');
+    return;
+  }
+  knownTargets = res.targets;
+  showToast(`Добавлено: ${name} — ${it.host}:${it.port}`, 'success');
+  closeCmd();
+  renderCustomAddressList();
+  checkTargets();
+}
+
+function refreshCmd() {
+  cmdItems = buildCmdItems($('cmdInput').value);
+  if (cmdIdx >= cmdItems.length) cmdIdx = 0;
+  renderCmdList();
+  const custom = knownTargets.filter((t) => !isDefaultTarget(t)).length;
+  $('cmdFoot').textContent = `${CATALOG.length} в каталоге · своих ${custom}`;
+}
+
+function openCmd() {
+  cmdIdx = 0;
+  $('cmdInput').value = '';
+  $('cmdOverlay').classList.remove('hidden');
+  refreshCmd();
+  setTimeout(() => $('cmdInput').focus(), 30);
+}
+
+function closeCmd() {
+  $('cmdOverlay').classList.add('hidden');
+}
+
+$('openCmdBtn').onclick = openCmd;
+$('cmdInput').oninput = () => {
+  cmdIdx = 0;
+  refreshCmd();
+};
+$('cmdOverlay').onclick = (e) => {
+  if (e.target === $('cmdOverlay')) closeCmd();
+};
+$('cmdInput').onkeydown = (e) => {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    cmdIdx = Math.min(cmdIdx + 1, cmdItems.length - 1);
+    renderCmdList();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    cmdIdx = Math.max(cmdIdx - 1, 0);
+    renderCmdList();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    cmdPick(cmdItems[cmdIdx]);
+  } else if (e.key === 'Escape') {
+    closeCmd();
+  }
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !aboutOverlay.classList.contains('hidden')) {
+    aboutOverlay.classList.add('hidden');
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    if ($('cmdOverlay').classList.contains('hidden')) openCmd();
+    else closeCmd();
+  }
+});
+
+$('resetGamesBtn').onclick = async () => {
+  const res = await window.zapret.resetGameTargets();
+  knownTargets = res.targets;
+  $('gamesMsg').textContent = 'Восстановлен список по умолчанию.';
+  renderCustomAddressList();
+  checkTargets();
+};
+
+// ─────────── Тесты ───────────
+
+// Тестовый скрипт пишет два разных формата аналитики в зависимости от режима,
+// поэтому определяем по содержимому, а не по тому, что запускали.
+function parseResults(text) {
+  const idx = text.indexOf('=== ANALYTICS ===');
+  const block = idx >= 0 ? text.slice(idx) : text;
+  const rows = [];
+  let mode = 'standard';
+
+  const stdRe = /^(.+?)\s*:\s*HTTP OK:\s*(\d+),\s*ERR:\s*(\d+),\s*UNSUP:\s*(\d+),\s*Ping OK:\s*(\d+),\s*Fail:\s*(\d+)\s*$/gm;
+  let m;
+  while ((m = stdRe.exec(block))) {
+    rows.push({ config: m[1].trim(), ok: +m[2], err: +m[3], unsup: +m[4], pingOk: +m[5], pingFail: +m[6] });
+  }
+
+  if (!rows.length) {
+    mode = 'dpi';
+    const dpiRe = /^(.+?)\s*:\s*OK:\s*(\d+),\s*ERR:\s*(\d+),\s*UNSUP:\s*(\d+),\s*BLOCK(?:ED)?:\s*(\d+)\s*$/gm;
+    while ((m = dpiRe.exec(block))) {
+      rows.push({ config: m[1].trim(), ok: +m[2], err: +m[3], unsup: +m[4], blocked: +m[5] });
+    }
+  }
+
+  if (!rows.length) return { rows: [], best: null, mode };
+
+  if (mode === 'dpi') rows.sort((a, b) => b.ok - a.ok || a.blocked - b.blocked || a.err - b.err);
+  else rows.sort((a, b) => b.ok - a.ok || b.pingOk - a.pingOk || a.err - b.err);
+
+  return { rows, best: rows[0].config, mode };
+}
+
+// Раньше здесь были ещё и словесные уровни («Пробивает»/«Частично»/«Не
+// пробивает») — убрали: сам процент точнее и не нуждается в переводе на
+// три размытые категории. Цвет остаётся, чтобы шкала читалась с одного взгляда.
+function verdictColor(score) {
+  return score >= 0.85 ? 'var(--green)' : score >= 0.4 ? 'var(--tx-3)' : 'var(--red-row)';
+}
+
+// Одна оценка "качества" вместо разрозненных чисел — доля целей, которые
+// реально ответили, из всех, что этот прогон вообще проверял для этой
+// стратегии (для DPI-режима "заблокировано" тоже считается неудачей).
+function verdictFor(r, mode) {
+  const total = mode === 'dpi' ? r.ok + r.err + r.unsup + r.blocked : r.ok + r.err + r.unsup;
+  const score = total ? r.ok / total : 0;
+  return { score, total, color: verdictColor(score) };
+}
+
+// Последняя колонка таблицы результатов: что произойдёт по клику на строку.
+function resultActionLabel(config) {
+  if (!currentState.running) return 'Включить';
+  return currentState.activeConfig === config ? 'активен' : 'Переключить';
+}
+
+const GRID_RESULTS = 'minmax(0,1fr) 110px minmax(140px,1.2fr) 90px';
+const GRID_RESULTS_DETAILED = 'minmax(0,1fr) 110px minmax(120px,1fr) 56px 56px 56px 90px';
+const QUALITY_HINT = 'Доля проверенных целей, которые ответили';
+let resultsDetailsOpen = false;
+// So the Конфиги list can show each strategy's last verdict without a
+// separate round trip — same data renderResults() already parsed.
+let lastResultsCache = null;
+
+function renderResults(text) {
+  const { rows, best, mode } = parseResults(text);
+  const head = $('resultsHead');
+  const body = $('resultsBody');
+
+  if (!rows.length) {
+    $('resultsCard').classList.add('hidden');
+    $('testsEmpty').classList.remove('hidden');
+    return;
+  }
+
+  lastResultsCache = { rows, mode };
+  renderConfigList();
+
+  $('resultsCard').classList.remove('hidden');
+  $('testsEmpty').classList.add('hidden');
+
+  const grid = resultsDetailsOpen ? GRID_RESULTS_DETAILED : GRID_RESULTS;
+  head.style.gridTemplateColumns = grid;
+  const detailsBtn = `<button class="link-btn" id="resDetailsToggle">${resultsDetailsOpen ? 'Скрыть детали' : 'Детали'}</button>`;
+  head.innerHTML = resultsDetailsOpen
+    ? `<div>Конфиг</div><div title="${QUALITY_HINT}">Пройдено</div><div>Качество</div>` +
+      '<div>HTTP</div><div>Ping</div><div>DPI</div>' +
+      `<div style="text-align:right">${detailsBtn}</div>`
+    : `<div>Конфиг</div><div title="${QUALITY_HINT}">Пройдено</div><div>Качество</div>` +
+      `<div style="text-align:right">${detailsBtn}</div>`;
+
+  body.innerHTML = '';
+  for (const r of rows) {
+    const isBest = r.config === best;
+    const v = verdictFor(r, mode);
+    const pct = Math.round(v.score * 100);
+    const row = document.createElement('div');
+    row.className = 'tbl-row' + (isBest ? ' best' : '');
+    row.style.gridTemplateColumns = grid;
+
+    const httpText = mode === 'dpi' ? '—' : `${r.ok}/${v.total}`;
+    const pingText = mode === 'dpi' ? '—' : `${r.pingOk}/${r.pingOk + r.pingFail}`;
+    const dpiText = mode === 'dpi' ? `${r.ok}/${v.total}` : '—';
+
+    row.innerHTML =
+      `<div class="tc-name"><span>${esc(displayName(r.config))}</span>${
+        isBest ? '<span class="badge">Лучший</span>' : ''
+      }</div>` +
+      `<div style="color:${v.color};font-weight:600">${pct}%</div>` +
+      `<div class="quality-cell"><div class="quality-bar"><div class="quality-fill" style="width:${pct}%;background:${v.color}"></div></div><span class="quality-num">${r.ok} из ${v.total} целей</span></div>` +
+      (resultsDetailsOpen
+        ? `<div class="tc-r" style="font-size:12.5px">${httpText}</div><div class="tc-r" style="font-size:12.5px">${pingText}</div><div class="tc-r" style="font-size:12.5px">${dpiText}</div>`
+        : '') +
+      `<div class="tc-r" style="color:var(--tx-4)">${esc(resultActionLabel(r.config))}</div>`;
+
+    row.title = 'Применить эту стратегию';
+    row.onclick = () => applyConfig(r.config, false);
+    body.appendChild(row);
+  }
+
+  $('resDetailsToggle').onclick = (e) => {
+    e.stopPropagation();
+    resultsDetailsOpen = !resultsDetailsOpen;
+    renderResults(text);
+  };
+}
+
+// "Оба" режима — гоняет HTTP/Ping и DPI-checker одно за другим (два реальных
+// прогона, не выдумка) и усредняет их доли по каждому конфигу. Итоговая
+
+
+let testMode = 'standard';
+
+$('testModeSwitch').querySelectorAll('.seg-btn').forEach((btn) => {
+  btn.onclick = () => {
+    if (testing) return;
+    testMode = btn.dataset.mode;
+    $('testModeSwitch').querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('active', b === btn));
+  };
+});
+
+let autoApply = localStorage.getItem('zapretAutoApply') === '1';
+let autoApplyHow = localStorage.getItem('zapretAutoApplyHow') === 'service' ? 'service' : 'run';
+
+function renderAutoApply() {
+  $('autoApplyToggle').classList.toggle('on', autoApply);
+  $('autoApplyHow').classList.toggle('hidden', !autoApply);
+  $('autoApplyNote').textContent = autoApply
+    ? autoApplyHow === 'service'
+      ? 'лучшая станет службой'
+      : 'лучшая применится автоматически'
+    : 'выключено';
+  $('autoApplyHow')
+    .querySelectorAll('.seg-btn')
+    .forEach((b) => b.classList.toggle('active', b.dataset.how === autoApplyHow));
+}
+
+$('autoApplyToggle').onclick = () => {
+  autoApply = !autoApply;
+  localStorage.setItem('zapretAutoApply', autoApply ? '1' : '0');
+  renderAutoApply();
+};
+
+$('autoApplyHow')
+  .querySelectorAll('.seg-btn')
+  .forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      autoApplyHow = b.dataset.how;
+      localStorage.setItem('zapretAutoApplyHow', autoApplyHow);
+      renderAutoApply();
+    };
+  });
+
+renderAutoApply();
+
+async function runAllTests(opts = {}) {
+  if (testing) {
+    showToast('Тесты уже идут', 'warn');
+    return;
+  }
+  testing = true;
+  pickFailed = false;
+  if (opts.btn) opts.btn.disabled = true;
+  renderConfigList();
+  renderHero();
+
+  // Прогон, запущенный с Главной, остаётся на Главной — там своё состояние
+  // «Подбираю» с прогрессом. Полный лог всё так же на Стратегиях.
+  if (opts.autoApply && activePage !== 'home') {
+    switchPage('strategies');
+    switchSubtab('tests');
+  }
+
+  const pickTotal = (currentState.configs || []).length;
+  const pickSeen = new Set();
+  const trackPick = (line) => {
+    const hit = (currentState.configs || []).find((c) => line.includes(c));
+    if (hit) pickSeen.add(hit);
+    $('heroPickStatus').textContent = hit
+      ? `${displayName(hit)} — ${pickSeen.size} из ${pickTotal}`
+      : line.trim().slice(0, 90) || 'проверяю…';
+    $('heroPickProgress').style.width = pickTotal ? `${Math.round((pickSeen.size / pickTotal) * 100)}%` : '0%';
+  };
+
+  $('testError').textContent = '';
+  $('testsEmpty').classList.add('hidden');
+  $('resultsCard').classList.add('hidden');
+  $('testLog').classList.remove('hidden');
+  $('testLog').textContent = '';
+  $('runTestsBtn').classList.add('hidden');
+  $('stopTestsBtn').classList.remove('hidden');
+  $('testModeSwitch').classList.add('disabled');
+
+  const appendLog = (line) => {
+    const log = $('testLog');
+    log.textContent += line + '\n';
+    log.scrollTop = log.scrollHeight;
+    trackPick(line);
+  };
+
+  const finish = () => {
+    testing = false;
+    if (opts.btn) opts.btn.disabled = false;
+    renderConfigList();
+    renderHero();
+    $('runTestsBtn').classList.remove('hidden');
+    $('stopTestsBtn').classList.add('hidden');
+    $('testModeSwitch').classList.remove('disabled');
+  };
+
+  const fail = (error) => {
+    $('testError').textContent = error || 'Тесты завершились с ошибкой';
+    showToast(error || 'Тесты завершились с ошибкой', 'error');
+  };
+
+  const applyBestAndFinish = async (best) => {
+    const shouldApply = opts.autoApply || autoApply;
+    if (shouldApply) {
+      if (!best) {
+        showToast('Лучшая стратегия не определилась', 'warn');
+      } else {
+        const applied = await applyConfig(best, !opts.autoApply && autoApplyHow === 'service', true);
+        if (applied) await verifyAppliedAndToast(best);
+      }
+    } else {
+      showToast('Тесты завершены', 'success');
+    }
+    refreshState();
+  };
+
+  // Режим «DPI → HTTP» целиком отрабатывает на стороне бэкенда: он сам
+  // прогоняет DPI по всем конфигам, отбирает прошедших на 100% и скармливает
+  // их номера скрипту вторым прогоном. Сюда возвращается уже итог.
+  const off = window.zapret.onTestLog(appendLog);
+  const res = await window.zapret.runTests({ mode: testMode });
+  off();
+  finish();
+
+  if (!res.ok) {
+    fail(res.error);
+    return;
+  }
+
+  renderResults(res.text);
+  loadTestsHistory();
+  const { best } = parseResults(res.text);
+  await applyBestAndFinish(best);
+}
+
+$('runTestsBtn').onclick = () => runAllTests();
+$('stopTestsBtn').onclick = () => window.zapret.stopTests();
+
+function loadLastResults() {
+  window.zapret.getLastTestResults().then((res) => {
+    if (res.ok) renderResults(res.text);
+    else {
+      $('resultsCard').classList.add('hidden');
+      $('testsEmpty').classList.remove('hidden');
+    }
+  });
+}
+
+// ─────────── Тесты: снимки прогонов и журнал автопереключений ───────────
+
+function healLogRow(e) {
+  const when = new Date(e.at).toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  if (e.type === 'gave-up') {
+    return `<div class="snap-row">
+      <div class="snap-left">
+        <span class="snap-date">${esc(when)}</span>
+        <span class="badge" style="color:var(--red-row);background:var(--red-bg)">сдалось</span>
+        <span class="snap-best">Перепробовано ${e.triedCount || 0} — все не работают, самолечение выключено</span>
+      </div>
+    </div>`;
+  }
+  const badge = e.ok
+    ? '<span class="badge">переключено</span>'
+    : '<span class="badge" style="color:var(--red-row);background:var(--red-bg)">не удалось</span>';
+  return `<div class="snap-row">
+    <div class="snap-left">
+      <span class="snap-date">${esc(when)}</span>
+      ${badge}
+      <span class="snap-best">${e.from ? esc(displayName(e.from)) + ' → ' : ''}${esc(displayName(e.to))}</span>
+    </div>
+  </div>`;
+}
+
+// Бывшая вкладка «История»: снимки прогонов и журнал самолечения живут под
+// результатами тестов — там, где их и ищут сразу после прогона.
+async function loadTestsHistory() {
+  const box = $('testsHistory');
+  const [res, healRes] = await Promise.all([window.zapret.getTestHistory(), window.zapret.getHealLog()]);
+
+  // Прогоны приходят от старого к новому — показываем свежие сверху.
+  const runs = res.ok ? res.runs.slice().reverse() : [];
+  const snaps = runs
+    .map(
+      (r) => `
+      <div class="snap-row">
+        <div class="snap-left">
+          <span class="snap-date">${esc(r.date)}</span>
+          <span class="badge ${r.mode === 'dpi' ? 'dpi' : 'neutral'}">${r.mode === 'dpi' ? 'DPI' : 'HTTP'}</span>
+          <span class="snap-best">${esc(r.best ? displayName(r.best) : '—')}</span>
+        </div>
+        <div class="snap-right">
+          <span class="snap-stat">лучший результат ${r.maxScore}</span>
+          <span class="cf-link" data-open="${esc(r.file)}">Открыть</span>
+        </div>
+      </div>`
+    )
+    .join('');
+
+  const healEntries = healRes.ok ? healRes.entries : [];
+  const healBody = healEntries.length
+    ? healEntries.map(healLogRow).join('')
+    : `<div class="empty"><div class="empty-title">Пока не переключалось</div>
+        <div class="empty-sub">Здесь будет журнал автопереключений — когда сработало самолечение и на что.</div></div>`;
+
+  const snapsCard = !res.ok
+    ? `<p class="error">${esc(res.error)}</p>`
+    : runs.length
+    ? `<div class="card">
+        <div class="card-head"><div class="ch-left"><span class="ch-title">Снимки прогонов</span></div></div>
+        ${snaps}
+      </div>`
+    : '';
+
+  box.innerHTML = `
+    ${snapsCard}
+    <div class="card">
+      <div class="card-head"><div class="ch-left"><span class="ch-title">Журнал автопереключений</span></div></div>
+      ${healBody}
+    </div>`;
+
+  box.querySelectorAll('[data-open]').forEach((el) => {
+    el.style.cursor = 'pointer';
+    el.onclick = async () => {
+      const res2 = await window.zapret.openResultFile(el.dataset.open);
+      if (!res2.ok) showToast(res2.error || 'Не удалось открыть файл', 'error');
+    };
+  });
+}
+
+// ─────────── Обзор (чипы главной) ───────────
+
+let lastTestBest = null; // last test run's winning config, for the idle "Вариант" stat
+
+async function loadOverview() {
+  const [autoSwitch, autostart, testHistory] = await Promise.all([
+    window.zapret.getAutoSwitch(),
+    window.zapret.getAutostart(),
+    window.zapret.getTestHistory(),
+  ]);
+
+  $('chipAutostart').textContent = autostart.enabled ? 'Включён' : 'Выключен';
+  $('homeAutostartToggle').classList.toggle('on', !!autostart.enabled);
+
+  $('chipHeal').textContent = autoSwitch.enabled ? `Включено · порог ${autoSwitch.threshold}` : 'Выключено';
+  $('chipHealHint').textContent = autoSwitch.enabled
+    ? `переключиться после ${autoSwitch.threshold} сбоев`
+    : 'автопереключение при сбое';
+  $('homeAutoSwitchToggle').classList.toggle('on', !!autoSwitch.enabled);
+
+  if (testHistory.ok && testHistory.runs.length) {
+    const last = testHistory.runs[testHistory.runs.length - 1];
+    $('statLastRun').textContent = `${last.date} · ${last.maxScore}`;
+    lastTestBest = last.best || null;
+  } else {
+    $('statLastRun').textContent = 'ещё не запускались';
+    lastTestBest = null;
+  }
+  $('heroRedoBtn').classList.toggle('hidden', !lastTestBest);
+}
+
+// ─────────── Настройки: служба ───────────
+
+const SVC_LABELS = {
+  RUNNING: 'работает',
+  STOPPED: 'остановлена',
+  START_PENDING: 'запускается',
+  STOP_PENDING: 'останавливается',
+  PAUSED: 'приостановлена',
+};
+
+function svcLabel(s) {
+  return SVC_LABELS[s] || s || '—';
+}
+
+function statCell(label, text, dot) {
+  return `<div>
+    <div class="stat-label">${label}</div>
+    <div class="stat-val"><span class="stat-dot ${dot}"></span><span class="stat-text" title="${esc(text)}">${esc(text)}</span></div>
+  </div>`;
+}
+
+async function loadServiceStatus() {
+  const s = await window.zapret.getServiceStatus();
+  lastServiceStatus = s;
+  $('serviceStatus').innerHTML =
+    statCell(
+      'Служба zapret',
+      s.serviceExists ? svcLabel(s.serviceState) : 'не установлена',
+      s.serviceState === 'RUNNING' ? 'ok' : s.serviceExists ? 'bad' : ''
+    ) +
+    statCell('WinDivert', s.windivertState === 'RUNNING' ? 'активен' : 'не активен', s.windivertState === 'RUNNING' ? 'ok' : '') +
+    statCell('winws.exe', s.winwsRunning ? 'выполняется' : 'не выполняется', s.winwsRunning ? 'ok' : 'bad') +
+    statCell('Стратегия службы', s.strategy ? displayName(s.strategy) : '—', s.strategy ? 'ok' : '');
+  $('persistentToggle').classList.toggle('on', !!s.serviceExists);
+  $('persistentDesc').textContent = s.serviceExists
+    ? `Обход работает как служба Windows${s.strategy ? ` (${displayName(s.strategy)})` : ''} и переживает закрытие приложения и перезагрузку.`
+    : 'Сейчас обход останавливается вместе с Klutz. Включи, чтобы он работал как служба Windows.';
+  renderHomeFooter();
+}
+
+// «Держать обход включённым» = поставить текущий (или лучший из тестов)
+// конфиг службой Windows; выключение — снять службу.
+$('persistentToggle').onclick = async () => {
+  const on = $('persistentToggle').classList.contains('on');
+  if (on) {
+    const ok = await showConfirm('Снять службу zapret? Обход снова будет работать только пока открыт Klutz.');
+    if (!ok) return;
+    await window.zapret.removeService();
+    showToast('Служба снята', 'success');
+  } else {
+    const target = currentState.activeConfig || lastTestBest;
+    if (!target) {
+      showToast('Сначала подбери рабочий вариант', 'warn', { body: 'Службе нужно знать, какую стратегию держать включённой.' });
+      return;
+    }
+    const res = await window.zapret.installService(target);
+    if (!res.ok) {
+      showToast(res.error || 'Не удалось установить службу', 'error');
+      return;
+    }
+    showToast(`Обход держится службой: ${displayName(target)}`, 'success');
+  }
+  loadServiceStatus();
+  refreshState();
+};
+
+// ─────────── Настройки: автозапуск ───────────
+
+const autostartToggle = $('autostartToggle');
+
+async function loadAutostart() {
+  const res = await window.zapret.getAutostart();
+  autostartToggle.classList.toggle('on', !!res.enabled);
+}
+
+autostartToggle.onclick = async () => {
+  const wanted = !autostartToggle.classList.contains('on');
+  autostartToggle.classList.toggle('on', wanted);
+  const res = await window.zapret.setAutostart(wanted);
+  if (!res.ok) {
+    autostartToggle.classList.toggle('on', !wanted);
+    showToast(res.error || 'Не удалось изменить автозапуск', 'error');
+    return;
+  }
+  showToast(wanted ? 'Автозапуск включён' : 'Автозапуск отключён', 'success');
+  loadOverview();
+};
+
+// ─────────── Настройки: самолечение ───────────
+
+const autoSwitchToggle = $('autoSwitchToggle');
+const thresholdSeg = $('thresholdSeg');
+const checkIntervalSeg = $('checkIntervalSeg');
+
+const segValue = (seg, attr, fallback) => {
+  const active = seg.querySelector('.seg-btn.active');
+  return Number(active ? active.dataset[attr] : fallback);
+};
+
+function renderThresholdDesc() {
+  const sec = segValue(checkIntervalSeg, 'sec', 30);
+  const th = segValue(thresholdSeg, 'th', 3);
+  const every = sec >= 60 ? `${sec / 60} мин` : `${sec} сек`;
+  $('thresholdDesc').textContent =
+    `При интервале ${every} стратегия сменится примерно через ${Math.round((th * sec) / 60) || 1} мин после потери связи.`;
+}
+
+async function loadAutoSwitch() {
+  const s = await window.zapret.getAutoSwitch();
+  autoSwitchToggle.classList.toggle('on', !!s.enabled);
+  thresholdSeg.querySelectorAll('.seg-btn').forEach((b) =>
+    b.classList.toggle('active', Number(b.dataset.th) === s.threshold)
+  );
+  checkIntervalSeg.querySelectorAll('.seg-btn').forEach((b) =>
+    b.classList.toggle('active', Number(b.dataset.sec) === s.intervalSec)
+  );
+  renderThresholdDesc();
+}
+
+async function saveAutoSwitch() {
+  await window.zapret.setAutoSwitch({
+    enabled: autoSwitchToggle.classList.contains('on'),
+    threshold: segValue(thresholdSeg, 'th', 3),
+    intervalSec: segValue(checkIntervalSeg, 'sec', 30),
+  });
+  renderThresholdDesc();
+  loadOverview();
+}
+
+autoSwitchToggle.onclick = async () => {
+  const on = autoSwitchToggle.classList.toggle('on');
+  await saveAutoSwitch();
+  showToast(on ? 'Автопереключение включено' : 'Автопереключение выключено', 'success');
+};
+
+[thresholdSeg, checkIntervalSeg].forEach((seg) => {
+  seg.querySelectorAll('.seg-btn').forEach((b) => {
+    b.onclick = () => {
+      seg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+      saveAutoSwitch();
+    };
+  });
+});
+
+window.zapret.onAutoSwitched(({ from, to }) => {
+  showToast(`Переключился: ${from ? displayName(from) + ' → ' : ''}${displayName(to)}`, 'warn');
+  refreshState();
+  if (activePage === 'strategies' && activeSubtab === 'tests') loadTestsHistory();
+});
+
+// ─────────── Настройки: периодический автопрогон тестов ───────────
+
+const autoTestToggle = $('autoTestToggle');
+const autoTestIntervalSeg = $('autoTestIntervalSeg');
+
+async function loadAutoTestSchedule() {
+  const s = await window.zapret.getAutoTestSchedule();
+  autoTestToggle.classList.toggle('on', !!s.enabled);
+  autoTestIntervalSeg.querySelectorAll('.seg-btn').forEach((b) =>
+    b.classList.toggle('active', Number(b.dataset.days) === s.intervalDays)
+  );
+}
+
+async function saveAutoTestSchedule() {
+  const active = autoTestIntervalSeg.querySelector('.seg-btn.active');
+  await window.zapret.setAutoTestSchedule({
+    enabled: autoTestToggle.classList.contains('on'),
+    intervalDays: Number(active ? active.dataset.days : 7),
+  });
+}
+
+autoTestToggle.onclick = async () => {
+  const on = autoTestToggle.classList.toggle('on');
+  await saveAutoTestSchedule();
+  showToast(on ? 'Автопрогон тестов включён' : 'Автопрогон тестов выключен', 'success');
+};
+
+autoTestIntervalSeg.querySelectorAll('.seg-btn').forEach((b) => {
+  b.onclick = () => {
+    autoTestIntervalSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+    saveAutoTestSchedule();
+  };
+});
+
+// ─────────── Настройки: уведомления ───────────
+
+const notifyToggle = $('notifyToggle');
+
+async function loadNotifications() {
+  const s = await window.zapret.getNotifications();
+  notifyToggle.classList.toggle('on', !!s.enabled);
+  if (!s.supported) $('notifyMsg').textContent = 'Система не поддерживает уведомления.';
+}
+
+notifyToggle.onclick = async () => {
+  const on = notifyToggle.classList.toggle('on');
+  await window.zapret.setNotifications(on);
+  showToast(on ? 'Уведомления включены' : 'Уведомления выключены', 'success');
+};
+
+$('testNotifyBtn').onclick = async () => {
+  const res = await window.zapret.testNotification();
+  $('notifyMsg').textContent = res.ok ? 'Отправлено — проверь угол экрана.' : res.error || 'Не удалось отправить.';
+};
+
+// Windows toast XML only offers picking a named system sound, not a real
+// volume level — so the toast itself goes out silent (see buildToastXml in
+// main.js) and this synthesised chime is what the user actually hears,
+// with a real, continuously adjustable gain instead of an OS sound picker.
+let notifyAudioCtx = null;
+
+function playNotifyChime(volume, critical) {
+  const gain = Math.max(0, Math.min(1, (Number(volume) || 0) / 100));
+  if (gain <= 0) return;
+  try {
+    if (!notifyAudioCtx) notifyAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (notifyAudioCtx.state === 'suspended') notifyAudioCtx.resume();
+
+    const playTone = (freq, startAt, dur) => {
+      const osc = notifyAudioCtx.createOscillator();
+      const g = notifyAudioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const now = notifyAudioCtx.currentTime + startAt;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(gain * 0.5, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+      osc.connect(g);
+      g.connect(notifyAudioCtx.destination);
+      osc.start(now);
+      osc.stop(now + dur + 0.02);
+    };
+
+    playTone(880, 0, 0.18);
+    playTone(1320, 0.12, 0.22);
+    if (critical) playTone(660, 0.32, 0.28);
+  } catch {}
+}
+
+window.zapret.onPlayNotifySound(({ volume, critical }) => playNotifyChime(volume, critical));
+
+const notifyVolumeRange = $('notifyVolumeRange');
+const notifyVolumeVal = $('notifyVolumeVal');
+const notifyDurationSeg = $('notifyDurationSeg');
+
+async function loadNotifySound() {
+  const s = await window.zapret.getNotifySound();
+  notifyVolumeRange.value = s.volume;
+  notifyVolumeVal.textContent = s.volume + '%';
+  notifyDurationSeg
+    .querySelectorAll('.seg-btn')
+    .forEach((b) => b.classList.toggle('active', b.dataset.dur === s.duration));
+}
+
+async function saveNotifySound() {
+  const active = notifyDurationSeg.querySelector('.seg-btn.active');
+  await window.zapret.setNotifySound({
+    volume: Number(notifyVolumeRange.value),
+    duration: active ? active.dataset.dur : 'short',
+  });
+}
+
+notifyVolumeRange.oninput = () => {
+  notifyVolumeVal.textContent = notifyVolumeRange.value + '%';
+};
+notifyVolumeRange.onchange = () => {
+  saveNotifySound();
+  playNotifyChime(notifyVolumeRange.value, false);
+};
+
+notifyDurationSeg.querySelectorAll('.seg-btn').forEach((b) => {
+  b.onclick = () => {
+    notifyDurationSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+    saveNotifySound();
+  };
+});
+
+// ─────────── Telegram (TgWsProxy) ───────────
+
+const tgwsproxyToggle = $('tgwsproxyToggle');
+const tgwsproxyAutostartToggle = $('tgwsproxyAutostartToggle');
+const openTgLinkBtn = $('openTgLinkBtn');
+let tgwsproxyBusy = false;
+let tgwsproxyLogLines = [];
+
+async function loadTgwsproxyAutostart() {
+  const s = await window.zapret.getTgwsproxySettings();
+  tgwsproxyAutostartToggle.classList.toggle('on', !!s.autoStart);
+}
+
+tgwsproxyAutostartToggle.onclick = async () => {
+  const enabled = !tgwsproxyAutostartToggle.classList.contains('on');
+  tgwsproxyAutostartToggle.classList.toggle('on', enabled);
+  await window.zapret.setTgwsproxyAutostart(enabled);
+};
+
+async function loadTgwsproxyStatus() {
+  const status = await window.zapret.getTgwsproxyStatus();
+  const warn = status.running && status.healthy === false;
+
+  tgwsproxyToggle.classList.toggle('on', status.running);
+  openTgLinkBtn.disabled = !status.running;
+  $('tgwsproxyLogsBtn').classList.toggle('hidden', !status.running);
+  $('tgwsproxyRestartBtn').classList.toggle('hidden', !status.running);
+  $('tgwsproxyStatus').textContent = !status.running
+    ? status.available
+      ? 'остановлен'
+      : 'файл не найден'
+    : warn
+    ? 'запущен, не отвечает'
+    : 'запущен';
+  // Separate from the toggle on purpose — the toggle reflects what you asked
+  // for, this reflects what's actually true right now (including whether it's
+  // actually accepting connections, not just "the process exists"), so the
+  // two can never be silently out of sync with no visible sign of it.
+  const dot = $('tgwsproxyDot');
+  const live = $('tgwsproxyLive');
+  dot.classList.toggle('off', !status.running);
+  dot.classList.toggle('warn', warn);
+  live.classList.toggle('off', !status.running);
+  live.classList.toggle('warn', warn);
+  live.textContent = !status.running ? 'ВЫКЛЮЧЕНО' : warn ? 'НЕ ОТВЕЧАЕТ' : 'ВКЛЮЧЕНО';
+
+  // The Главная overview card shows the same state — keep it correct
+  // regardless of what triggered the change (this page, the tray, the wizard).
+  $('engineTgToggle').classList.toggle('on', status.running);
+  $('engineTgDot').className = 'status-dot' + (warn ? ' warn' : status.running ? ' ok' : '');
+  renderTgStatusbar(status.running);
+  $('engineTgDesc').textContent = warn
+    ? 'запущен, не отвечает'
+    : status.running
+    ? 'обходит блокировку'
+    : 'Telegram — отдельный MTProto-прокси';
+}
+
+tgwsproxyToggle.onclick = async () => {
+  if (tgwsproxyBusy) return;
+  const turningOn = !tgwsproxyToggle.classList.contains('on');
+  tgwsproxyBusy = true;
+
+  if (!turningOn) {
+    await window.zapret.stopTgwsproxy();
+    tgwsproxyBusy = false;
+    loadTgwsproxyStatus();
+    return;
+  }
+
+  const startRes = await window.zapret.startTgwsproxy();
+  tgwsproxyBusy = false;
+  if (!startRes.ok) {
+    showToast(startRes.error || 'Не удалось запустить TgWsProxy', 'error');
+    loadTgwsproxyStatus();
+    return;
+  }
+  showToast('TgWsProxy запущен', 'success');
+  loadTgwsproxyStatus();
+};
+
+$('tgwsproxyRestartBtn').onclick = async () => {
+  if (tgwsproxyBusy) return;
+  tgwsproxyBusy = true;
+  const res = await window.zapret.restartTgwsproxy();
+  tgwsproxyBusy = false;
+  if (!res.ok) showToast(res.error || 'Не удалось перезапустить', 'error');
+  else showToast('TgWsProxy перезапущен', 'success');
+  loadTgwsproxyStatus();
+};
+
+openTgLinkBtn.onclick = async () => {
+  wizardTgLinkClicked = true;
+  const res = await window.zapret.openTgProxyLink();
+  if (!res.ok) showToast(res.error || 'Не удалось открыть ссылку', 'error');
+};
+
+$('copyTgLinkBtn').onclick = async () => {
+  await window.zapret.getTgwsproxySettings(); // ensures secret/defaults exist even before the first start
+  const status = await window.zapret.getTgwsproxyStatus();
+  if (!status.tgProxyUrl) {
+    showToast('Не удалось получить ссылку', 'error');
+    return;
+  }
+  const copied = await window.zapret.copyText(status.tgProxyUrl);
+  if (!copied || !copied.ok) {
+    showToast('Не удалось скопировать ссылку' + (copied && copied.error ? ': ' + copied.error : ''), 'error');
+    return;
+  }
+  showToast('Ссылка скопирована', 'success');
+};
+
+// ---- settings panel ----
+
+// Fields are always visible on this page now (Главная owns the on/off
+// switch) — this just (re)populates them from whatever's actually saved,
+// on page load and as "Отменить правки".
+async function openTgwsproxySettings() {
+  const s = await window.zapret.getTgwsproxySettings();
+  $('tgwsproxyHostInput').value = s.host;
+  $('tgwsproxyPortInput').value = s.port;
+  $('tgwsproxySecretInput').value = s.secret;
+  $('tgwsproxyDcArea').value = (s.dcIps || []).join('\n');
+  $('tgwsproxyCfToggle').classList.toggle('on', !!s.cfproxy);
+  $('tgwsproxySettingsMsg').textContent = '';
+}
+
+
+$('tgwsproxyCfToggle').onclick = () => $('tgwsproxyCfToggle').classList.toggle('on');
+
+$('regenTgSecretBtn').onclick = async () => {
+  const res = await window.zapret.regenerateTgwsproxySecret();
+  if (res.ok) $('tgwsproxySecretInput').value = res.secret;
+};
+
+$('tgwsproxySaveBtn').onclick = async () => {
+  const wasRunning = tgwsproxyToggle.classList.contains('on');
+  const res = await window.zapret.setTgwsproxySettings({
+    host: $('tgwsproxyHostInput').value,
+    port: Number($('tgwsproxyPortInput').value),
+    secret: $('tgwsproxySecretInput').value,
+    dcIps: $('tgwsproxyDcArea').value,
+    cfproxy: $('tgwsproxyCfToggle').classList.contains('on'),
+  });
+  if (!res.ok) {
+    $('tgwsproxySettingsMsg').textContent = res.error || 'Не удалось сохранить';
+    return;
+  }
+  showToast('Настройки сохранены', 'success');
+
+  if (wasRunning) {
+    const ok = await showConfirm('Перезапустить TgWsProxy с новыми настройками?');
+    if (ok) {
+      await window.zapret.stopTgwsproxy();
+      await window.zapret.startTgwsproxy();
+    }
+  }
+  loadTgwsproxyStatus();
+};
+
+// ---- live log ----
+
+function renderTgwsproxyLog() {
+  const el = $('tgwsproxyLog');
+  el.textContent = tgwsproxyLogLines.join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+window.zapret.onTgwsproxyLog((lines) => {
+  tgwsproxyLogLines.push(...lines);
+  if (tgwsproxyLogLines.length > 500) tgwsproxyLogLines = tgwsproxyLogLines.slice(-500);
+  if (!$('tgwsproxyLog').classList.contains('hidden')) renderTgwsproxyLog();
+});
+
+// The tray is a second surface that can start/stop the proxy independently of
+// this window — refresh our own display whenever the real state changes,
+// regardless of which surface caused it.
+window.zapret.onTgwsproxyStateChanged(() => {
+  loadTgwsproxyStatus();
+});
+
+$('tgwsproxyLogsBtn').onclick = async () => {
+  const el = $('tgwsproxyLog');
+  if (el.classList.contains('hidden')) {
+    const res = await window.zapret.getTgwsproxyLog();
+    tgwsproxyLogLines = res.lines || [];
+    el.classList.remove('hidden');
+    renderTgwsproxyLog();
+  } else {
+    el.classList.add('hidden');
+  }
+};
+
+// ─────────── Настройки: экспорт/импорт ───────────
+
+$('exportSettingsBtn').onclick = async () => {
+  const res = await window.zapret.exportSettings();
+  if (res.canceled) return;
+  showToast(res.ok ? 'Настройки сохранены' : res.error || 'Не удалось экспортировать', res.ok ? 'success' : 'error');
+};
+
+$('importSettingsBtn').onclick = async () => {
+  const res = await window.zapret.importSettings();
+  if (res.canceled) return;
+  if (!res.ok) {
+    showToast(res.error || 'Не удалось импортировать', 'error');
+    return;
+  }
+  showToast('Настройки применены', 'success');
+  loadNotifications();
+  loadNotifySound();
+  loadAutoSwitch();
+  loadAutoTestSchedule();
+  loadOverview();
+};
+
+// ─────────── Настройки: сеть и фильтры ───────────
+
+const IPSET_LABELS = { any: 'любые IP (any)', none: 'нет (none)', loaded: 'загружен список' };
+const gameFilterSeg = $('gameFilterSeg');
+const autoUpdateToggle = $('autoUpdateToggle');
+
+async function loadToggles() {
+  const t = await window.zapret.getToggles();
+  if (!t || !t.gameMode) return;
+  gameFilterSeg.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.gf === t.gameMode));
+  $('ipsetVal').textContent = IPSET_LABELS[t.ipsetMode] || t.ipsetMode;
+  autoUpdateToggle.classList.toggle('on', !!t.autoUpdate);
+}
+
+gameFilterSeg.querySelectorAll('.seg-btn').forEach((b) => {
+  b.onclick = async () => {
+    gameFilterSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+    await window.zapret.setGameFilter(b.dataset.gf);
+  };
+});
+
+$('ipsetModeBtn').onclick = async () => {
+  const res = await window.zapret.cycleIpsetMode();
+  if (!res.ok) showToast(res.error || 'Не удалось переключить', 'error');
+  loadToggles();
+};
+
+autoUpdateToggle.onclick = async () => {
+  const on = autoUpdateToggle.classList.toggle('on');
+  await window.zapret.setAutoUpdate(on);
+};
+
+// ─────────── Настройки: свои списки ───────────
+
+$('listsToggleBtn').onclick = () => {
+  const hidden = $('listsEditor').classList.toggle('hidden');
+  $('listsToggleBtn').textContent = hidden ? 'Показать' : 'Скрыть';
+};
+
+async function loadCustomLists() {
+  const res = await window.zapret.getCustomLists();
+  if (!res.ok) return;
+  $('includeListArea').value = res.include;
+  $('excludeListArea').value = res.exclude;
+}
+
+$('saveListsBtn').onclick = async () => {
+  const res = await window.zapret.saveCustomLists({
+    include: $('includeListArea').value,
+    exclude: $('excludeListArea').value,
+  });
+  $('listsMsg').textContent = res.ok
+    ? 'Сохранено. Применится при следующем запуске стратегии.'
+    : `Ошибка: ${res.error}`;
+  if (res.ok) showToast('Списки сохранены', 'success');
+};
+
+// ─────────── Настройки: обслуживание ───────────
+
+const maint = $('maintenanceMsg');
+
+$('updateIpsetBtn').onclick = async () => {
+  maint.textContent = 'Обновляю список IPSet…';
+  const res = await window.zapret.updateIpsetList();
+  maint.textContent = !res.ok
+    ? `Ошибка: ${res.error}`
+    : res.applied
+    ? 'Список IPSet обновлён.'
+    : `Список скачан и сохранён про запас — сейчас IPSet Filter в режиме «${IPSET_LABELS[res.mode] || res.mode}», применится при переключении на «загружен список».`;
+  loadToggles();
+};
+
+$('updateHostsBtn').onclick = async () => {
+  maint.textContent = 'Проверяю hosts-файл…';
+  const res = await window.zapret.updateHostsFile();
+  maint.textContent = !res.ok
+    ? `Ошибка: ${res.error}`
+    : res.needsUpdate
+    ? 'Открыл файл для сравнения — перенеси нужные строки вручную.'
+    : 'hosts-файл уже актуален.';
+};
+
+$('checkUpdatesBtn').onclick = async () => {
+  const line = $('releaseVersionLine');
+  const notesBox = $('updateNotes');
+  const notesBody = $('updateNotesBody');
+  const notesBtn = $('openReleaseNotesBtn');
+  notesBox.classList.add('hidden');
+  line.textContent = 'Проверяю версию…';
+
+  const res = await window.zapret.checkUpdates();
+  if (!res.ok) {
+    line.textContent = `Ошибка: ${res.error}`;
+    return;
+  }
+  if (res.upToDate) {
+    line.textContent = `Установлена последняя версия: ${res.local}`;
+    return;
+  }
+
+  line.textContent = `Доступна новая версия ${res.remote} (у тебя ${res.local}).`;
+  notesBody.textContent = res.notes || 'Список изменений недоступен — смотри на GitHub.';
+  notesBtn.dataset.url = res.releaseUrl;
+  notesBox.classList.remove('hidden');
+};
+
+$('openReleaseNotesBtn').onclick = () => {
+  const url = $('openReleaseNotesBtn').dataset.url;
+  if (url) window.zapret.openExternalUrl(url);
+};
+
+$('clearDiscordBtn').onclick = async () => {
+  maint.textContent = 'Чищу кэш Discord…';
+  const res = await window.zapret.clearDiscordCache();
+  maint.textContent = res.cleared.length
+    ? `Очищено: ${res.cleared.join(', ')}`
+    : 'Кэш уже пуст или Discord не найден.';
+};
+
+let lastDiagResults = null;
+
+function buildDiagReport(results) {
+  const release = currentState.rootPath ? currentState.rootPath.split(/[\\/]/).pop() : 'не загружен';
+  return [
+    'Klutz — диагностика системы',
+    new Date().toLocaleString('ru-RU'),
+    `Релиз: ${release}`,
+    '',
+    ...results.map((r) => `${r.ok ? '✓' : '✗'} ${r.label}${r.warn ? ' — ' + r.warn : ''}`),
+  ].join('\n');
+}
+
+$('copyDiagBtn').onclick = async () => {
+  const btn = $('copyDiagBtn');
+  if (!lastDiagResults) {
+    btn.disabled = true;
+    btn.textContent = 'Проверяю…';
+    await runDiagnosticsAndRender();
+    btn.disabled = false;
+    btn.textContent = 'Скопировать отчёт';
+  }
+  if (!lastDiagResults) return;
+
+  const text = buildDiagReport(lastDiagResults);
+  let copied = false;
+  let lastErr = null;
+  try {
+    const res = await window.zapret.copyText(text);
+    copied = !!(res && res.ok);
+    if (!copied) lastErr = new Error((res && res.error) || 'буфер обмена недоступен');
+  } catch (err) {
+    lastErr = err;
+  }
+  if (!copied) {
+    // The native clipboard can briefly fail to open (another app holding it) —
+    // the web API goes through a different code path, worth a second try
+    // before telling the user it's broken.
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (err2) {
+      lastErr = err2;
+    }
+  }
+  if (copied) {
+    showToast('Отчёт скопирован', 'success');
+  } else {
+    showToast('Не удалось скопировать: ' + (lastErr && lastErr.message ? lastErr.message : lastErr), 'error');
+  }
+};
+
+async function runDiagnosticsAndRender() {
+  const box = $('diagResults');
+  $('diagHint').classList.add('hidden');
+  $('runDiagBtn').disabled = true;
+  box.innerHTML = '<div class="diag-row"><span class="dr-icon">·</span><span>Проверяю…</span></div>';
+  const res = await window.zapret.runDiagnostics();
+  $('runDiagBtn').disabled = false;
+  lastDiagResults = res.ok ? res.results : null;
+  const bad = res.results.filter((r) => !r.ok).length;
+  $('maintenanceMsg2').textContent = bad ? `${bad} из ${res.results.length} проверок с проблемами` : 'всё в порядке';
+  $('diagFoot').classList.remove('hidden');
+  box.innerHTML = res.results
+    .map((r) => {
+      const fixBtn =
+        !r.ok && r.fixKey
+          ? `<button class="btn ghost xs diag-fix-btn" data-fix="${esc(r.fixKey)}">Исправить</button>`
+          : '';
+      return `<div class="diag-row ${r.ok ? 'ok' : 'bad'}"><span class="dr-icon">${r.ok ? '✓' : '✗'}</span><span>${esc(
+        r.label
+      )}</span>${r.warn ? `<span class="dr-warn">${esc(r.warn)}</span>` : ''}${fixBtn}</div>`;
+    })
+    .join('');
+
+  box.querySelectorAll('[data-fix]').forEach((btn) => {
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = 'Исправляю…';
+      const fixRes = await window.zapret.fixDiagnostic(btn.dataset.fix);
+      if (!fixRes.ok) {
+        showToast(fixRes.error || 'Не удалось исправить', 'error');
+        btn.disabled = false;
+        btn.textContent = 'Исправить';
+        return;
+      }
+      showToast('Исправлено', 'success');
+      runDiagnosticsAndRender();
+    };
+  });
+}
+
+$('runDiagBtn').onclick = runDiagnosticsAndRender;
+
+// ─────────── Смена релиза ───────────
+
+async function changeRelease() {
+  if (currentState.running) {
+    const ok = await showConfirm('Обход сейчас работает. Остановить и сменить релиз?');
+    if (!ok) return;
+    await window.zapret.stopConfig();
+  }
+  choosingNewRelease = true;
+  targetsLoaded = false;
+  loadError.textContent = '';
+  $('cancelChangeReleaseBtn').classList.remove('hidden');
+  render();
+}
+
+$('changeReleaseBtn').onclick = changeRelease;
+$('changeReleaseBtn2').onclick = changeRelease;
+
+$('openReleaseFolderBtn').onclick = async () => {
+  const res = await window.zapret.openReleaseFolder();
+  if (!res.ok) showToast(res.error || 'Не удалось открыть папку', 'error');
+};
+
+$('cancelChangeReleaseBtn').onclick = () => {
+  choosingNewRelease = false;
+  // If this dropzone visit came from the wizard's "also add zapret?" offer,
+  // backing out shouldn't leave a stale wait armed for whenever a release
+  // eventually does get loaded some unrelated way later.
+  wizardAwaitingRelease = false;
+  $('cancelChangeReleaseBtn').classList.add('hidden');
+  render();
+};
+
+// ─────────── Настройки: прошлые релизы (откат) ───────────
+
+async function switchToRelease(root) {
+  if (currentState.running) {
+    const ok = await showConfirm('Обход сейчас работает. Остановить и переключиться на другой релиз?');
+    if (!ok) return;
+    await window.zapret.stopConfig();
+  }
+  const res = await window.zapret.loadPath(root);
+  if (!res.ok) {
+    showToast(res.error || 'Не удалось переключиться', 'error');
+    return;
+  }
+  await afterReleaseLoaded();
+  showToast('Переключился на другой релиз', 'success');
+}
+
+async function deleteReleaseRow(folderName) {
+  const ok = await showConfirm('Удалить эту версию с диска? Отменить не получится.');
+  if (!ok) return;
+  const res = await window.zapret.deleteRelease(folderName);
+  if (!res.ok) {
+    showToast(res.error || 'Не удалось удалить', 'error');
+    return;
+  }
+  showToast('Релиз удалён', 'success');
+  loadReleaseList();
+}
+
+async function loadReleaseList() {
+  const box = $('releaseList');
+  const res = await window.zapret.listReleases();
+  if (!res.ok || res.releases.length === 0) {
+    box.innerHTML = '';
+    return;
+  }
+
+  box.innerHTML = res.releases
+    .map((r) => {
+      const date = r.extractedAt ? new Date(r.extractedAt).toLocaleDateString('ru-RU') : '—';
+      return `<div class="release-row ${r.active ? 'active' : ''}">
+        <div class="release-main">
+          <span class="release-ver">${esc(r.version || r.folderName)}</span>
+          <span class="release-date">${date}</span>
+          ${r.active ? '<span class="release-active-badge">активен</span>' : ''}
+        </div>
+        <div class="release-actions">
+          ${
+            r.active
+              ? ''
+              : `<button class="btn ghost xs" data-switch="${esc(r.folderName)}">Переключиться</button>
+                 <button class="btn ghost xs" data-delete="${esc(r.folderName)}">Удалить</button>`
+          }
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  box.querySelectorAll('[data-switch]').forEach((btn) => {
+    btn.onclick = () => {
+      const rel = res.releases.find((r) => r.folderName === btn.dataset.switch);
+      if (rel) switchToRelease(rel.root);
+    };
+  });
+  box.querySelectorAll('[data-delete]').forEach((btn) => {
+    btn.onclick = () => deleteReleaseRow(btn.dataset.delete);
+  });
+}
+
+// ─────────── Падение winws ───────────
+
+window.zapret.onWinwsCrashed((name) => {
+  showToast(`${displayName(name)} неожиданно остановился`, 'error');
+  refreshState();
+});
+
+// ─────────── Онбординг ───────────
+
+async function afterReleaseLoaded() {
+  choosingNewRelease = false;
+  $('cancelChangeReleaseBtn').classList.add('hidden');
+  await refreshState();
+  loadToggles();
+  loadServiceStatus();
+  loadCustomLists();
+  loadLastResults();
+  loadAutostart();
+  loadAutoSwitch();
+  loadAutoTestSchedule();
+  loadNotifications();
+  loadNotifySound();
+  loadTgwsproxyStatus();
+  loadReleaseList();
+  loadOverview();
+  ensureTargetsLoaded();
+
+  if (wizardAwaitingRelease) {
+    wizardAwaitingRelease = false;
+    continueWizardAfterDiscordSetup();
+  }
+}
+
+$('onboardStartBtn').onclick = () => {
+  $('onboardTourOverlay').classList.add('hidden');
+  startTour(INFO_TOUR_STEPS);
+};
+$('onboardSkipBtn').onclick = () => {
+  $('onboardTourOverlay').classList.add('hidden');
+  window.zapret.setOnboardingDone(true);
+};
+$('replayTourBtn').onclick = (e) => {
+  e.preventDefault();
+  startTour(INFO_TOUR_STEPS);
+};
+
+// selector: CSS selector string, or a function returning the element (for
+// targets where the visible one depends on state, like the hero card).
+const INFO_TOUR_STEPS = [
+  {
+    page: 'home',
+    selector: '.sb-nav',
+    title: 'Разделы приложения',
+    text: 'Слева — вся навигация: Главная, Стратегии, Диагностика, Telegram и Настройки. Кнопка вверху сворачивает панель, если мешает.',
+  },
+  {
+    page: 'home',
+    selector: () => document.querySelector('#heroActive:not(.hidden), #heroIdle:not(.hidden)'),
+    title: 'Статус обхода',
+    text: 'Тут видно, работает ли обход прямо сейчас. Если нет — одна кнопка сама протестирует варианты и включит рабочий, без похода в «Стратегии».',
+  },
+  {
+    page: 'diagnostics',
+    selector: '#diagCoreCard',
+    title: 'Здоровье связи',
+    text: 'Пингует ключевые адреса Discord и YouTube и показывает, что из этого реально отвечает. Обновляется само, «Проверить» — вручную.',
+  },
+  {
+    page: 'home',
+    selector: '.auto-cards',
+    title: 'Автоматизация',
+    text: 'Включать обход при входе в Windows и сам переключать вариант, если связь пропала. Тумблеры здесь — те же, что в «Настройках».',
+  },
+  {
+    page: 'strategies',
+    subtab: 'configs',
+    selector: '#configList',
+    title: 'Конфиги обхода',
+    text: 'Все стратегии из движка zapret, сгруппированные по семействам. У каждой своё меню «⋯»: запустить разово, поставить службой, остановить.',
+  },
+  {
+    page: 'strategies',
+    subtab: 'tests',
+    selector: '#runTestsBtn',
+    title: 'Тесты стратегий',
+    text: '«Запустить тесты» прогоняет все конфиги по очереди и показывает, какой реально пробивает блокировку — лучший результат подсвечивается в таблице.',
+  },
+  {
+    page: 'diagnostics',
+    selector: '#diagCoreCard',
+    title: 'Диагностика',
+    text: 'Одно место проверить, что живо: цели обхода и игровые сервисы с пингом. Если что-то не отвечает — здесь же кнопки быстрого исправления типовых проблем.',
+  },
+  {
+    page: 'home',
+    selector: '#engineTgToggle',
+    title: 'Обход для Telegram',
+    text: 'Отдельный процесс специально под Telegram, независимый от обхода Discord/YouTube. Включается этим тумблером, а на вкладке Telegram есть «Открыть» — сразу настроит прокси в Telegram Desktop.',
+  },
+  {
+    page: 'settings',
+    selector: '#settingsAutomationCard',
+    title: 'Настройки',
+    text: 'Автозапуск при входе в Windows, самолечение при сбоях стратегии, расписание автотестов — и ещё три группы ниже: уведомления, сеть и фильтры, обслуживание.',
+  },
+];
+
+// ---- generic spotlight engine — shared by the informational tour above and
+// the action-guided setup wizard below ----
+
+let tourIndex = 0;
+let tourActiveSteps = INFO_TOUR_STEPS;
+let tourOnComplete = null;
+let tourWaitTimer = null;
+const tourResizeHandler = () => positionTourStep(tourActiveSteps[tourIndex]);
+
+function startTour(steps, onComplete) {
+  tourActiveSteps = steps;
+  tourOnComplete = onComplete || null;
+  tourIndex = 0;
+  $('tourOverlay').classList.remove('hidden');
+  window.addEventListener('resize', tourResizeHandler);
+  showTourStep(0);
+}
+
+function finishTour() {
+  if (tourWaitTimer) {
+    clearInterval(tourWaitTimer);
+    tourWaitTimer = null;
+  }
+  $('tourOverlay').classList.add('hidden');
+  window.removeEventListener('resize', tourResizeHandler);
+  const cb = tourOnComplete;
+  tourOnComplete = null;
+  if (cb) cb();
+  else window.zapret.setOnboardingDone(true);
+}
+
+async function showTourStep(i) {
+  if (tourWaitTimer) {
+    clearInterval(tourWaitTimer);
+    tourWaitTimer = null;
+  }
+  const step = tourActiveSteps[i];
+  if (!step) {
+    finishTour();
+    return;
+  }
+  tourIndex = i;
+
+  if (step.page) switchPage(step.page);
+  if (step.subtab) switchSubtab(step.subtab);
+
+  // Give the page/subtab switch a frame to actually paint before measuring —
+  // some target lists are populated by handlers triggered from switchPage.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  const target = positionTourStep(step);
+  if (!target) {
+    // Target isn't there right now (e.g. list still empty) — don't get stuck,
+    // just move past this step in whichever direction we were going.
+    showTourStep(i + 1);
+    return;
+  }
+
+  $('tourStepLabel').textContent = `Шаг ${i + 1} из ${tourActiveSteps.length}`;
+  $('tourTitle').textContent = step.title;
+  $('tourText').textContent = step.text;
+  $('tourPrevBtn').disabled = i === 0;
+  $('tourNextBtn').textContent = i === tourActiveSteps.length - 1 ? 'Готово' : 'Далее';
+
+  // waitFor steps hold the "Далее" button disabled and auto-advance once the
+  // real action actually happened — this is what makes the setup wizard walk
+  // someone through actually doing the thing, not just pointing at a button.
+  if (step.waitFor) {
+    $('tourNextBtn').disabled = true;
+    const check = async () => {
+      if (await step.waitFor()) {
+        if (tourWaitTimer) {
+          clearInterval(tourWaitTimer);
+          tourWaitTimer = null;
+        }
+        showTourStep(i + 1);
+      }
+    };
+    tourWaitTimer = setInterval(check, 800);
+    check();
+  } else {
+    $('tourNextBtn').disabled = false;
+  }
+}
+
+// Край подсветки, не доехавший пару пикселей до края контейнера (сайдбара,
+// карточки), оставлял тонкую затемнённую щель в 1px. Такие края дотягиваем
+// до ближайшей границы родителя, а всё округляем до целых пикселей.
+function snapTourHole(target, rect, pad) {
+  const xs = [0, window.innerWidth];
+  const ys = [0, window.innerHeight];
+  for (let n = target.parentElement; n && n !== document.body; n = n.parentElement) {
+    const r = n.getBoundingClientRect();
+    xs.push(r.left, r.right);
+    ys.push(r.top, r.bottom);
+  }
+  const snap = (v, edges) => {
+    for (const e of edges) if (Math.abs(v - e) <= 3) return Math.round(e);
+    return Math.round(v);
+  };
+  return {
+    left: snap(rect.left - pad, xs),
+    right: snap(rect.right + pad, xs),
+    top: snap(rect.top - pad, ys),
+    bottom: snap(rect.bottom + pad, ys),
+  };
+}
+
+function positionTourStep(step) {
+  const target = typeof step.selector === 'function' ? step.selector() : document.querySelector(step.selector);
+  if (!target) return null;
+
+  // Страница под туром заблокирована и сама не прокрутится — докручиваем.
+  target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  const rect = target.getBoundingClientRect();
+  const hole = snapTourHole(target, rect, 6);
+  const hl = $('tourHighlight');
+  hl.style.top = `${hole.top}px`;
+  hl.style.left = `${hole.left}px`;
+  hl.style.width = `${hole.right - hole.left}px`;
+  hl.style.height = `${hole.bottom - hole.top}px`;
+
+  // Шаги мастера ждут настоящего действия — там подсвеченное должно
+  // нажиматься, остальное нет. Обычные шаги — только смотреть.
+  const blocker = $('tourBlocker');
+  if (step.waitFor) {
+    const T = 38; // блокировка начинается под титулбаром
+    const W = window.innerWidth;
+    const H = window.innerHeight - T;
+    blocker.style.clipPath =
+      `path(evenodd, 'M0 0H${W}V${H}H0Z ` +
+      `M${hole.left} ${hole.top - T}H${hole.right}V${hole.bottom - T}H${hole.left}Z')`;
+  } else {
+    blocker.style.clipPath = '';
+  }
+
+  const callout = $('tourCallout');
+  const calloutWidth = callout.offsetWidth || 300;
+  const calloutHeight = callout.offsetHeight || 160;
+  const margin = 14;
+
+  let left = rect.right + margin;
+  if (left + calloutWidth > window.innerWidth - margin) {
+    left = rect.left - margin - calloutWidth;
+  }
+  if (left < margin) {
+    left = Math.min(Math.max(rect.left, margin), window.innerWidth - calloutWidth - margin);
+  }
+
+  let top = rect.top;
+  if (top + calloutHeight > window.innerHeight - margin) {
+    top = window.innerHeight - calloutHeight - margin;
+  }
+  if (top < margin) top = margin;
+
+  callout.style.left = `${left}px`;
+  callout.style.top = `${top}px`;
+  return target;
+}
+
+$('tourNextBtn').onclick = () => { if (!$('tourNextBtn').disabled) showTourStep(tourIndex + 1); };
+$('tourPrevBtn').onclick = () => showTourStep(Math.max(0, tourIndex - 1));
+$('tourSkipBtn').onclick = () => finishTour();
+
+// Клавиатура тоже не должна трогать интерфейс под туром: Tab уводил фокус
+// на кнопки страницы, а Enter и пробел их нажимали.
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if ($('tourOverlay').classList.contains('hidden')) return;
+    if ($('tourCallout').contains(e.target)) return;
+    const step = tourActiveSteps[tourIndex];
+    if (step && step.waitFor) return;
+    if (e.key === 'Tab' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  },
+  true
+);
+
+// ---- setup wizard: "what do you want to configure" → guided action steps ----
+
+let wizardChoice = null; // 'discord' | 'telegram' | 'both' — the initial pick
+let wizardAwaitingRelease = false;
+let wizardTgLinkClicked = false;
+// Branch-completion flags, not wizardChoice itself, drive what happens after
+// each branch finishes — wizardChoice alone can't tell "just finished
+// Discord, having arrived via the Telegram branch's cross-offer" apart from
+// "just finished Discord as the very first and only branch", and those two
+// need different endings (the former skips the offer it already got asked).
+let wizardDiscordDone = false;
+let wizardTelegramDone = false;
+
+function showWizardChoice() {
+  $('wizardChoiceOverlay').classList.remove('hidden');
+}
+
+$('wizardChooseDiscordBtn').onclick = () => startWizardBranch('discord');
+$('wizardChooseTelegramBtn').onclick = () => startWizardBranch('telegram');
+$('wizardChooseBothBtn').onclick = () => startWizardBranch('both');
+
+function startWizardBranch(choice) {
+  wizardChoice = choice;
+  $('wizardChoiceOverlay').classList.add('hidden');
+
+  if (choice === 'telegram') {
+    telegramOnlyMode = true;
+    localStorage.setItem('zapretTelegramOnly', '1');
+    activePage = 'telegram';
+    render();
+    loadTgwsproxyStatus();
+    loadTgwsproxyAutostart();
+    runTelegramWizardSteps();
+    return;
+  }
+
+  // 'discord' or 'both' — the dropzone is already showing underneath (no
+  // release loaded yet); wait for a real one before continuing the wizard.
+  wizardAwaitingRelease = true;
+}
+
+const DISCORD_WIZARD_STEPS = [
+  {
+    page: 'home',
+    selector: () => document.querySelector('#heroActive:not(.hidden), #heroIdle:not(.hidden)'),
+    title: 'Включи обход',
+    text: 'Нажми «Подобрать и включить» — Klutz сам проверит несколько способов обхода и включит тот, что реально работает у тебя в сети.',
+    waitFor: () => !!currentState.activeConfig,
+  },
+  {
+    page: 'diagnostics',
+    selector: '#diagCoreCard',
+    title: 'Готово — проверь результат',
+    text: 'Обход включён. Открой Discord или YouTube и убедись, что всё грузится. Здесь же можно свериться по пингу и, если что-то не так, воспользоваться кнопками быстрого исправления.',
+  },
+];
+
+const TELEGRAM_WIZARD_STEPS = [
+  {
+    page: 'home',
+    selector: '#engineTgToggle',
+    title: 'Включи обход для Telegram',
+    text: 'Нажми переключатель — Klutz поднимет локальный прокси специально для Telegram, отдельно от обхода Discord/YouTube.',
+    waitFor: async () => (await window.zapret.getTgwsproxyStatus()).running,
+  },
+  {
+    page: 'telegram',
+    selector: '#openTgLinkBtn',
+    title: 'Настрой прокси в Telegram',
+    text: 'Нажми «Открыть» — Telegram Desktop сам предложит добавить этот прокси, останется подтвердить.',
+    waitFor: () => wizardTgLinkClicked,
+  },
+];
+
+function runDiscordWizardSteps() {
+  startTour(DISCORD_WIZARD_STEPS, () => {
+    wizardDiscordDone = true;
+    if (wizardTelegramDone) {
+      // Arrived here via the Telegram branch's own cross-offer — already
+      // asked, already answered, nothing left to offer.
+      window.zapret.setOnboardingDone(true);
+    } else if (wizardChoice === 'both') {
+      runTelegramWizardSteps();
+    } else {
+      offerCrossSetup(
+        'Настроить также обход блокировки Telegram?',
+        () => runTelegramWizardSteps(),
+        () => window.zapret.setOnboardingDone(true)
+      );
+    }
+  });
+}
+
+function continueWizardAfterDiscordSetup() {
+  runDiscordWizardSteps();
+}
+
+function runTelegramWizardSteps() {
+  wizardTgLinkClicked = false;
+  startTour(TELEGRAM_WIZARD_STEPS, () => {
+    wizardTelegramDone = true;
+    if (wizardDiscordDone) {
+      window.zapret.setOnboardingDone(true);
+    } else if (wizardChoice === 'both') {
+      runDiscordWizardSteps();
+    } else {
+      offerCrossSetup(
+        'Настроить также обход блокировки Discord и YouTube (zapret)?',
+        () => {
+          wizardAwaitingRelease = true;
+          changeRelease();
+        },
+        () => window.zapret.setOnboardingDone(true)
+      );
+    }
+  });
+}
+
+function offerCrossSetup(text, onYes, onNo) {
+  $('wizardCrossOfferText').textContent = text;
+  $('wizardCrossOfferOverlay').classList.remove('hidden');
+  $('wizardCrossOfferYesBtn').onclick = () => {
+    $('wizardCrossOfferOverlay').classList.add('hidden');
+    onYes();
+  };
+  $('wizardCrossOfferNoBtn').onclick = () => {
+    $('wizardCrossOfferOverlay').classList.add('hidden');
+    onNo();
+  };
+}
+
+async function loadFromPath(p) {
+  loadError.textContent = '';
+  const res = await window.zapret.loadPath(p);
+  if (!res.ok) {
+    loadError.textContent = res.error || 'Не удалось загрузить релиз';
+    return;
+  }
+  await afterReleaseLoaded();
+}
+
+window.zapret.getLatestReleaseInfo().then((info) => {
+  if (!info.ok) {
+    $('onboardVersionInfo').textContent = 'Не удалось проверить версию на GitHub — выбери вручную.';
+    $('downloadLatestBtn').classList.add('hidden');
+    $('manualLoadSection').classList.remove('hidden');
+    $('showManualLoadBtn').classList.add('hidden');
+    return;
+  }
+  $('onboardVersionInfo').textContent = `Версия ${info.version} · ${(info.size / 1024 / 1024).toFixed(1)} МБ`;
+  $('downloadLatestBtn').disabled = false;
+});
+
+$('downloadLatestBtn').onclick = async () => {
+  loadError.textContent = '';
+  $('downloadLatestBtn').disabled = true;
+  $('showManualLoadBtn').classList.add('hidden');
+  $('downloadProgressWrap').classList.remove('hidden');
+  $('downloadProgressFill').style.width = '0%';
+  $('downloadProgressText').textContent = 'Скачиваю…';
+
+  const off = window.zapret.onDownloadProgress(({ received, total }) => {
+    if (!total) return;
+    const pct = Math.round((received / total) * 100);
+    $('downloadProgressFill').style.width = pct + '%';
+    $('downloadProgressText').textContent =
+      `${pct}% · ${(received / 1024 / 1024).toFixed(1)} из ${(total / 1024 / 1024).toFixed(1)} МБ`;
+  });
+
+  const res = await window.zapret.downloadLatestRelease();
+  off();
+  $('downloadProgressWrap').classList.add('hidden');
+  $('downloadLatestBtn').disabled = false;
+  $('showManualLoadBtn').classList.remove('hidden');
+
+  if (!res.ok) {
+    loadError.textContent = res.error || 'Не удалось скачать';
+    showToast(res.error || 'Не удалось скачать', 'error');
+    return;
+  }
+  showToast('Zapret скачан и загружен', 'success');
+  await afterReleaseLoaded();
+};
+
+$('showManualLoadBtn').onclick = () => {
+  const hidden = $('manualLoadSection').classList.toggle('hidden');
+  $('showManualLoadBtn').textContent = hidden ? 'Уже скачан — выбрать вручную →' : 'Скрыть';
+};
+
+$('pickFolderBtn').onclick = async () => {
+  const p = await window.zapret.pickFolder();
+  if (p) loadFromPath(p);
+};
+
+$('pickArchiveBtn').onclick = async () => {
+  const p = await window.zapret.pickArchive();
+  if (p) loadFromPath(p);
+};
+
+['dragenter', 'dragover'].forEach((evt) =>
+  window.addEventListener(evt, (e) => {
+    e.preventDefault();
+    if (!dropZone.classList.contains('hidden')) dropZone.classList.add('drag-over');
+  })
+);
+['dragleave', 'drop'].forEach((evt) =>
+  window.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+  })
+);
+window.addEventListener('drop', (e) => {
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) {
+    showToast('Не увидела файл в перетаскивании', 'error');
+    return;
+  }
+  let p = null;
+  try {
+    p = window.zapret.getPathForFile(file);
+  } catch (err) {
+    showToast('Не удалось определить путь: ' + (err && err.message ? err.message : err), 'error');
+    return;
+  }
+  if (!p) {
+    showToast('Путь к файлу пуст — не могу его загрузить', 'error');
+    return;
+  }
+  loadFromPath(p);
+});
+
+// ─────────── Старт ───────────
+
+applyUiMode();
+loadOverview();
+
+(async () => {
+  await refreshState();
+  const ob = await window.zapret.getOnboardingDone();
+
+  if (currentState.rootPath) {
+    await afterReleaseLoaded();
+    // Edge case: onboarding somehow not done but a release already exists
+    // (e.g. state was reset by hand) — the pre-release wizard doesn't apply
+    // any more, fall back to the plain informational tour offer instead.
+    if (!ob.done) $('onboardTourOverlay').classList.remove('hidden');
+  } else if (!ob.done) {
+    showWizardChoice();
+  }
+})();
+
+setInterval(refreshState, 4000);
