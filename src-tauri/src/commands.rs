@@ -33,6 +33,26 @@ pub struct GetStateResult {
     started_at: Option<u64>,
 }
 
+/// Снимок последней фоновой проверки в том виде, в каком его ждёт renderer
+/// (функция coreCheck): цели с именем и результатом плюс время проверки.
+fn monitor_snapshot(state: &State<AppState>) -> Option<serde_json::Value> {
+    let at = *state.last_check_at.lock().unwrap();
+    if at == 0 {
+        return None;
+    }
+    let targets: Vec<_> = state
+        .last_targets
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(name, ok, ms)| serde_json::json!({ "name": name, "ok": ok, "ms": ms }))
+        .collect();
+    if targets.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "targets": targets, "checkedAt": at }))
+}
+
 /// Port of the `get-state` IPC handler.
 #[tauri::command(async)]
 pub fn get_state(state: State<AppState>) -> GetStateResult {
@@ -53,9 +73,10 @@ pub fn get_state(state: State<AppState>) -> GetStateResult {
         installed_as_service: persisted.installed_as_service,
         has_test_script: check.as_ref().map(|c| c.has_test_script).unwrap_or(false),
         can_install_service: check.as_ref().map(|c| c.can_install_service).unwrap_or(false),
-        // TODO: port the connectivity monitor (runMonitorTick in main.js) —
-        // this slice doesn't have it yet, so "Здоровье связи" stays blank.
-        monitor: None,
+        // Данные последней фоновой проверки: раньше здесь стоял None за
+        // комментарием «монитор ещё не портирован», хотя monitor.rs давно
+        // есть и держит результат в last_check/last_targets.
+        monitor: monitor_snapshot(&state),
         started_at: if running { persisted.started_at } else { None },
     }
 }
@@ -78,8 +99,8 @@ pub enum LoadPathResult {
     },
 }
 
-/// Port of `load-path` — folder case only for this first slice (the .zip
-/// extraction path from `extractZipRelease()` isn't ported yet).
+/// Загрузка релиза из папки. Для .zip есть отдельная команда
+/// `load_archive` — она распаковывает архив и зовёт эту.
 #[tauri::command(async)]
 pub fn load_path(app: AppHandle, state: State<AppState>, input_path: String) -> LoadPathResult {
     let path = PathBuf::from(&input_path);
@@ -125,8 +146,8 @@ pub struct RunConfigResult {
     live_logs: bool,
 }
 
-/// Port of `run-config` → `applyDirect()`. Service install (asService) isn't
-/// ported in this slice — Стратегии's "запустить разово" path only.
+/// Разовый запуск конфига прямым спавном winws.exe. Установка службой —
+/// отдельная команда `install_service`.
 #[tauri::command(async)]
 pub fn run_config(app: AppHandle, state: State<AppState>, file_name: String) -> RunConfigResult {
     let root = match state.persisted.lock().unwrap().root_path.clone() {
@@ -139,6 +160,10 @@ pub fn run_config(app: AppHandle, state: State<AppState>, file_name: String) -> 
             }
         }
     };
+
+    if let Err(e) = checked_config(&root, &file_name) {
+        return RunConfigResult { ok: false, error: Some(e), live_logs: false };
+    }
 
     // Установленная служба zapret держит свой winws.exe — прямой запуск
     // поверх неё конфликтует, поэтому просим сначала снять службу.
@@ -187,6 +212,9 @@ pub fn stop_config(app: AppHandle, state: State<AppState>) -> Result<(), ()> {
         let mut p = state.persisted.lock().unwrap();
         p.active_config = None;
         p.started_at = None;
+        // Службы после этой команды нет: её снимает отдельная кнопка, а
+        // висящий флаг заставлял apply_config снова ставить конфиг службой.
+        p.installed_as_service = false;
     }
     save_state(&app, &state);
     Ok(())
@@ -314,26 +342,39 @@ pub fn run_tests(app: AppHandle, state: State<AppState>, mode: String) -> RunTes
 
     // Команды выполняются параллельно, поэтому второй запуск надо отсечь
     // здесь: два прогона одновременно перетирали бы конфиг друг другу.
-    {
-        let mut testing = state.testing.lock().unwrap();
-        if *testing {
-            return RunTestsResult { ok: false, error: Some("Тесты уже идут.".into()), text: String::new() };
-        }
-        *testing = true;
-    }
-    let result = run_tests_inner(&app, &state, &root, &mode);
-    *state.testing.lock().unwrap() = false;
-    *state.test_pid.lock().unwrap() = None;
+    // Тот же замок берёт и автопрогон — см. state::TestRun.
+    let Some(run) = crate::state::TestRun::acquire(&state) else {
+        return RunTestsResult { ok: false, error: Some("Тесты уже идут.".into()), text: String::new() };
+    };
+
+    // Скрипт сам поднимает и гасит winws под каждый конфиг, так что к концу
+    // прогона работает что угодно. Запоминаем, что было до.
+    let before = state.persisted.lock().unwrap().active_config.clone();
+    let result = run_tests_inner(&app, &run, &root, &mode);
+    restore_after_tests(&app, before);
     result
+}
+
+/// Возвращает обход в то состояние, в котором он был до прогона. Без этого
+/// окно и трей показывали стратегию, которой уже нет: `active_config` прогон
+/// не трогает, а winws остаётся на последнем протестированном конфиге.
+pub fn restore_after_tests(app: &AppHandle, before: Option<String>) {
+    match before {
+        Some(name) => {
+            if let Err(e) = crate::monitor::apply_config(app, &name) {
+                let _ = app.emit("test-log", format!("Не удалось вернуть {name}: {e}"));
+            }
+        }
+        None => winws::kill_winws(app),
+    }
 }
 
 fn run_tests_inner(
     app: &AppHandle,
-    state: &State<AppState>,
+    run: &crate::state::TestRun<'_>,
     root: &Path,
     mode: &str,
 ) -> RunTestsResult {
-    let _ = state;
     if mode != "funnel" {
         return match crate::tests::run_test_script(app, root, mode == "dpi", None) {
             Ok(text) => RunTestsResult { ok: true, error: None, text },
@@ -347,6 +388,13 @@ fn run_tests_inner(
         Ok(t) => t,
         Err(e) => return RunTestsResult { ok: false, error: Some(e), text: String::new() },
     };
+
+    // Между этапами живого процесса нет, и «Остановить» гасить нечего —
+    // без этой проверки второй этап стартовал бы уже после отмены.
+    if run.cancelled() {
+        let _ = app.emit("test-log", "Прогон остановлен — второй этап не запускаем.".to_string());
+        return RunTestsResult { ok: true, error: None, text: dpi_text };
+    }
 
     let (dpi_rows, _) = crate::tests::parse_results(&dpi_text);
     let configs = crate::release::list_configs(root);
@@ -411,16 +459,21 @@ pub fn get_last_test_results(state: State<AppState>) -> LastResults {
 
 #[tauri::command(async)]
 pub fn stop_tests(state: State<AppState>) {
+    // Флаг ставим до убийства: воронка между этапами живого процесса не
+    // имеет, и увидеть отмену она может только так.
+    *state.test_cancel.lock().unwrap() = true;
     // Гасим ровно то дерево, которое сами и запустили: убивать все
     // powershell.exe нельзя — у пользователя могут быть свои открытые окна.
-    let pid = state.test_pid.lock().unwrap().take();
+    let pid = *state.test_pid.lock().unwrap();
     if let Some(pid) = pid {
         crate::sys::run("taskkill", &["/PID", &pid.to_string(), "/T", "/F"]);
     }
     // Скрипт поднимает winws.exe сам, отдельным процессом — он переживёт
     // смерть powershell, если его не тронуть.
     winws::stop_winws();
-    *state.testing.lock().unwrap() = false;
+    // `testing` снимает владелец прогона (state::TestRun) на выходе. Снимать
+    // его здесь значило бы пустить второй прогон, пока первый ещё
+    // сворачивается, — и его PID тут же затёрся бы хвостом первого.
 }
 
 // ─────────── Служба Windows ───────────
@@ -442,12 +495,39 @@ fn root_of(state: &State<AppState>) -> Option<PathBuf> {
     state.persisted.lock().unwrap().root_path.clone().map(PathBuf::from)
 }
 
+/// Имя конфига должно быть ровно одним из тех, что мы сами показали в
+/// списке. Без этого строка из интерфейса уезжала в `cmd /c <имя>` —
+/// запасной путь запуска в winws.rs и установка службой, — а cmd разбирает
+/// свою командную строку заново: «general&calc.exe» выполнило бы вторую
+/// команду от имени администратора.
+fn checked_config(root: &Path, file_name: &str) -> Result<(), String> {
+    if crate::release::list_configs(root).iter().any(|c| c == file_name) {
+        Ok(())
+    } else {
+        Err(format!("Нет такого конфига в релизе: {file_name}"))
+    }
+}
+
+/// Имя файла или папки, которое пришло из интерфейса и будет приклеено к
+/// нашему каталогу. Кроме «..» и разделителей отсекаем префикс диска:
+/// в Windows `Path::join("C:foo")` выбрасывает базовый путь целиком.
+fn safe_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains(':')
+}
+
 #[tauri::command(async)]
 pub fn install_service(app: AppHandle, state: State<AppState>, file_name: String) -> SimpleResult {
     let root = match root_of(&state) {
         Some(r) => r,
         None => return err("Сначала загрузи релиз zapret."),
     };
+    if let Err(e) = checked_config(&root, &file_name) {
+        return err(e);
+    }
     winws::kill_winws(&app);
     std::thread::sleep(std::time::Duration::from_millis(300));
     match crate::service::install_service(&root, &file_name) {
@@ -643,6 +723,7 @@ pub fn set_auto_switch(
     }
     *state.degraded_ticks.lock().unwrap() = 0;
     state.healing_attempts.lock().unwrap().clear();
+    *state.heal_exhausted.lock().unwrap() = false;
     save_state(&app, &state);
     ok()
 }
@@ -927,7 +1008,7 @@ pub fn open_release_folder(state: State<AppState>) -> SimpleResult {
 pub fn open_result_file(state: State<AppState>, file_name: String) -> SimpleResult {
     // Только внутри папки результатов — имя приходит из интерфейса, но
     // проверить дешевле, чем доверять.
-    if file_name.contains("..") || file_name.contains('/') || file_name.contains('\\') {
+    if !safe_name(&file_name) {
         return err("Недопустимое имя файла.");
     }
     match root_of(&state) {
@@ -1206,6 +1287,7 @@ pub fn import_settings(app: AppHandle, state: State<AppState>, path: String) -> 
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
         return err("Файл настроек повреждён.");
     };
+    let mut imported_tgws_bad = false;
     {
         let mut p = state.persisted.lock().unwrap();
         if let Some(t) = v.get("gameTargets") {
@@ -1219,13 +1301,23 @@ pub fn import_settings(app: AppHandle, state: State<AppState>, path: String) -> 
         if let Some(n) = v.get("notifications").and_then(|n| n.as_bool()) {
             p.notifications = Some(n);
         }
+        // Настройки прокси из файла проходят те же проверки, что и ручной
+        // ввод: иначе импорт возвращал ровно ту поломанную ссылку
+        // tg://proxy, ради которой валидацию и добавляли.
         if let Some(t) = v.get("tgws") {
-            if let Ok(t) = serde_json::from_value(t.clone()) {
-                p.tgws = Some(t);
+            if let Ok(t) = serde_json::from_value::<crate::tgws::TgSettings>(t.clone()) {
+                if t.port > 0 && !t.host.trim().is_empty() && crate::tgws::is_valid_secret(&t.secret) {
+                    p.tgws = Some(t);
+                } else {
+                    imported_tgws_bad = true;
+                }
             }
         }
     }
     save_state(&app, &state);
+    if imported_tgws_bad {
+        return err("Настройки применены, кроме Telegram-прокси: в файле неверный хост, порт или секрет.");
+    }
     ok()
 }
 
@@ -1421,10 +1513,8 @@ pub fn window_toggle_maximize(window: tauri::Window) {
     }
 }
 
-// TODO: once the tray icon is ported, this should hide-to-tray like the
-// Electron build did (closing the window ≠ quitting — winws.exe keeps
-// running). For this first slice it just quits, so there's no way to get a
-// hidden window back yet.
+/// Не завершает приложение: обработчик CloseRequested в main.rs перехватывает
+/// закрытие и прячет окно в трей, иначе обход умер бы вместе с окном.
 #[tauri::command]
 pub fn window_close(window: tauri::Window) {
     let _ = window.close();

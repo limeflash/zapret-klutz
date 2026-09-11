@@ -3,7 +3,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter};
@@ -89,8 +89,18 @@ pub fn parse_results(text: &str) -> (Vec<ResultRow>, bool) {
     (rows, true)
 }
 
+/// stdout и stderr — разные типы, а обрабатываем их одинаково.
+enum Either {
+    Out(std::process::ChildStdout),
+    Err(std::process::ChildStderr),
+}
+
 fn results_dir(root: &Path) -> PathBuf {
     root.join("utils").join("test results")
+}
+
+fn is_result_file(name: &str) -> bool {
+    name.to_lowercase().ends_with(".txt")
 }
 
 fn snapshot_results(root: &Path) -> HashSet<String> {
@@ -98,6 +108,7 @@ fn snapshot_results(root: &Path) -> HashSet<String> {
         .map(|d| {
             d.filter_map(|e| e.ok())
                 .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| is_result_file(n))
                 .collect()
         })
         .unwrap_or_default()
@@ -109,7 +120,9 @@ fn newest_new_result(root: &Path, before: &HashSet<String>) -> Option<PathBuf> {
         .ok()?
         .filter_map(|e| e.ok())
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !before.contains(n))
+        // Без фильтра по расширению «самым свежим результатом» мог стать
+        // любой новый файл или подкаталог, созданный скриптом.
+        .filter(|n| is_result_file(n) && !before.contains(n))
         .collect();
     fresh.sort();
     fresh.pop().map(|n| dir.join(n))
@@ -155,9 +168,10 @@ pub fn run_test_script(
 
     // PID нужен, чтобы «Остановить» гасило именно этот прогон, а не все
     // powershell.exe в системе — включая чужие окна пользователя.
+    let pid = child.id();
     {
         use tauri::Manager;
-        *app.state::<crate::state::AppState>().test_pid.lock().unwrap() = Some(child.id());
+        *app.state::<crate::state::AppState>().test_pid.lock().unwrap() = Some(pid);
     }
 
     {
@@ -176,23 +190,20 @@ pub fn run_test_script(
         stdin.flush().ok();
     }
 
-    if let Some(stdout) = child.stdout.take() {
+    for stream in [child.stdout.take().map(Either::Out), child.stderr.take().map(Either::Err)]
+        .into_iter()
+        .flatten()
+    {
         let app2 = app.clone();
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().flatten() {
+            let emit = |line: String| {
                 if !line.trim().is_empty() {
                     let _ = app2.emit("test-log", line);
                 }
-            }
-        });
-    }
-    if let Some(stderr) = child.stderr.take() {
-        let app2 = app.clone();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().flatten() {
-                if !line.trim().is_empty() {
-                    let _ = app2.emit("test-log", line);
-                }
+            };
+            match stream {
+                Either::Out(s) => crate::sys::for_each_line(s, emit),
+                Either::Err(s) => crate::sys::for_each_line(s, emit),
             }
         });
     }
@@ -201,7 +212,13 @@ pub fn run_test_script(
     let _ = status;
     {
         use tauri::Manager;
-        *app.state::<crate::state::AppState>().test_pid.lock().unwrap() = None;
+        // Только если это всё ещё наш PID: в воронке скрипт запускается
+        // дважды, и безусловное обнуление стирало бы номер чужого этапа.
+        let state = app.state::<crate::state::AppState>();
+        let mut guard = state.test_pid.lock().unwrap();
+        if *guard == Some(pid) {
+            *guard = None;
+        }
     }
 
     let file = newest_new_result(root, &before)

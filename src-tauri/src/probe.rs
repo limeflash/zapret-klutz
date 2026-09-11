@@ -72,8 +72,16 @@ pub fn tcp_probe(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
             }
         }
     };
+    // Бюджет один на весь вызов. Раньше таймаут отсчитывался заново для
+    // каждого адреса из DNS, и хост с восемью A-записями отваливался не за
+    // 4 секунды, а за 32 — «Проверить связь» висла на полминуты.
+    let budget = Duration::from_millis(timeout_ms);
     for addr in addr_iter {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)).is_ok() {
+        let left = budget.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        if TcpStream::connect_timeout(&addr, left).is_ok() {
             return ProbeResult {
                 ok: true,
                 ms: started.elapsed().as_millis() as u64,

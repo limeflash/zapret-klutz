@@ -1,7 +1,6 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager};
@@ -181,78 +180,25 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
         cmd.creation_flags(CREATE_NO_WINDOW);
 
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
+        let pid = child.id();
 
-        if let Some(stdout) = stdout {
+        if let Some(stdout) = child.stdout.take() {
             let app2 = app.clone();
             std::thread::spawn(move || {
                 let state = app2.state::<AppState>();
-                let reader = BufReader::new(stdout);
-                for line in reader.lines().flatten() {
-                    push_log_lines(&app2, &state, &line);
-                }
+                crate::sys::for_each_line(stdout, |line| push_log_lines(&app2, &state, &line));
             });
         }
-        if let Some(stderr) = stderr {
+        if let Some(stderr) = child.stderr.take() {
             let app2 = app.clone();
             std::thread::spawn(move || {
                 let state = app2.state::<AppState>();
-                let reader = BufReader::new(stderr);
-                for line in reader.lines().flatten() {
-                    push_log_lines(&app2, &state, &line);
-                }
+                crate::sys::for_each_line(stderr, |line| push_log_lines(&app2, &state, &line));
             });
         }
 
         *state.winws_child.lock().unwrap() = Some(child);
-
-        // Watch for the process exiting on its own (crash) — same signal
-        // the Electron version's `child.on('exit', ...)` reacted to.
-        let app2 = app.clone();
-        std::thread::spawn(move || {
-            let state = app2.state::<AppState>();
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let mut guard = state.winws_child.lock().unwrap();
-                if let Some(child) = guard.as_mut() {
-                    match child.try_wait() {
-                        Ok(Some(_status)) => {
-                            *guard = None;
-                            drop(guard);
-                            let intentional = {
-                                let mut f = state.winws_intentional_stop.lock().unwrap();
-                                let was = *f;
-                                *f = false;
-                                was
-                            };
-                            if !intentional {
-                                let crashed = state.persisted.lock().unwrap().active_config.clone();
-                                if let Some(crashed) = crashed {
-                                    let mut p = state.persisted.lock().unwrap();
-                                    p.active_config = None;
-                                    p.installed_as_service = false;
-                                    p.started_at = None;
-                                    drop(p);
-                                    crate::state::save_state(&app2, &state);
-                                    crate::notify::send_critical_from(
-                                        &app2,
-                                        "Обход упал",
-                                        &format!("{} неожиданно остановилась.", crashed.trim_end_matches(".bat")),
-                                    );
-                                    let _ = app2.emit("winws-crashed", crashed);
-                                }
-                            }
-                            break;
-                        }
-                        Ok(None) => continue,
-                        Err(_) => break,
-                    }
-                } else {
-                    break;
-                }
-            }
-        });
+        watch_child(app, pid);
     } else {
         // Fallback: run the .bat itself via cmd — no live logs, but works
         // for any release shape, same tradeoff as the Electron fallback.
@@ -266,18 +212,114 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
         #[cfg(target_os = "windows")]
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.spawn().map_err(|e| e.to_string())?;
+        watch_by_poll(app);
     }
 
     Ok(live_logs)
 }
 
+/// Обход упал сам. Чистим состояние и говорим об этом всем, кто слушает.
+fn report_crash(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let crashed = state.persisted.lock().unwrap().active_config.clone();
+    let Some(crashed) = crashed else { return };
+    {
+        let mut p = state.persisted.lock().unwrap();
+        p.active_config = None;
+        p.installed_as_service = false;
+        p.started_at = None;
+    }
+    crate::state::save_state(app, &state);
+    crate::notify::send_critical_from(
+        app,
+        "Обход упал",
+        &format!("{} неожиданно остановилась.", crashed.trim_end_matches(".bat")),
+    );
+    let _ = app.emit("winws-crashed", crashed);
+    crate::tray::refresh(app);
+}
+
+/// Следит за КОНКРЕТНЫМ процессом. Раньше поток смотрел просто на ячейку
+/// `winws_child`: если он просыпался уже после того, как её занял следующий
+/// запуск, то оставался жить и стерёг чужого ребёнка — по одному лишнему
+/// потоку на каждое переключение самолечения.
+fn watch_child(app: &AppHandle, pid: u32) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let mut guard = state.winws_child.lock().unwrap();
+            let Some(child) = guard.as_mut() else { break };
+            if child.id() != pid {
+                break;
+            }
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    // Пожинаем процесс и освобождаем ячейку.
+                    *guard = None;
+                    drop(guard);
+                    let intentional = {
+                        let mut f = state.winws_intentional_stop.lock().unwrap();
+                        let was = *f;
+                        *f = false;
+                        was
+                    };
+                    if !intentional {
+                        report_crash(&app);
+                    }
+                    break;
+                }
+                Ok(None) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Резервный режим: winws поднимает сам .bat, своего `Child` у нас нет, и
+/// падение обхода тут не замечал вообще никто — ни уведомления, ни события
+/// `winws-crashed`. Следим опросом.
+fn watch_by_poll(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Даём процессу подняться, иначе «ещё не стартовал» примем за падение.
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let state = app.state::<AppState>();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            // Появился свой Child — значит запустили заново обычным путём,
+            // и за ним следит watch_child.
+            if state.winws_child.lock().unwrap().is_some() {
+                break;
+            }
+            if is_winws_running() {
+                continue;
+            }
+            let intentional = {
+                let mut f = state.winws_intentional_stop.lock().unwrap();
+                let was = *f;
+                *f = false;
+                was
+            };
+            if !intentional {
+                report_crash(&app);
+            }
+            break;
+        }
+    });
+}
+
 pub fn kill_winws(app: &AppHandle) {
     let state = app.state::<AppState>();
+    *state.winws_intentional_stop.lock().unwrap() = true;
     {
         let mut child_guard = state.winws_child.lock().unwrap();
         if let Some(mut child) = child_guard.take() {
-            *state.winws_intentional_stop.lock().unwrap() = true;
             let _ = child.kill();
+            // Ждём выхода: иначе процесс остаётся незажатым, а наблюдатель
+            // уже ушёл по ветке «ячейка пуста».
+            let _ = child.wait();
         }
     }
     stop_winws();

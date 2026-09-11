@@ -78,12 +78,20 @@ pub struct AppState {
     pub last_check: Mutex<Option<(usize, usize)>>,
     pub degraded_ticks: Mutex<u32>,
     pub healing_attempts: Mutex<Vec<String>>,
+    /// Про исчерпанный рейтинг сообщаем один раз за серию, а не каждый тик.
+    pub heal_exhausted: Mutex<bool>,
     pub testing: Mutex<bool>,
     /// PID запущенного прогона тестов — чтобы «Остановить» гасило именно его.
     pub test_pid: Mutex<Option<u32>>,
+    /// «Остановить» нажали. Второй этап воронки живого процесса ещё не имеет,
+    /// поэтому убивать нечего — прогон должен сам увидеть флаг и не начинать.
+    pub test_cancel: Mutex<bool>,
     /// Последняя фоновая проверка по целям (имя, ответила, мс) — меню трея
     /// показывает её построчно, как в Electron-версии.
     pub last_targets: Mutex<Vec<(String, bool, u64)>>,
+    /// Когда прошла последняя фоновая проверка, мс от эпохи. 0 — ещё ни разу.
+    /// Окно по нему решает, относится ли проверка к текущему конфигу.
+    pub last_check_at: Mutex<u64>,
 }
 
 impl AppState {
@@ -98,10 +106,48 @@ impl AppState {
             last_check: Mutex::new(None),
             degraded_ticks: Mutex::new(0),
             healing_attempts: Mutex::new(Vec::new()),
+            heal_exhausted: Mutex::new(false),
             testing: Mutex::new(false),
             test_pid: Mutex::new(None),
+            test_cancel: Mutex::new(false),
             last_targets: Mutex::new(Vec::new()),
+            last_check_at: Mutex::new(0),
         }
+    }
+}
+
+/// Право на прогон тестов. Источников два — кнопка в окне и автопрогон, —
+/// и раньше каждый вёл учёт сам: `run_tests` брал замок, а `autotest`
+/// присваивал `testing = true` в обход него. Два прогона PowerShell шли
+/// одновременно и перетирали друг другу и конфиг, и общий `test_pid`.
+/// Теперь оба ходят сюда, а снятие флагов делает Drop — в том числе на
+/// раннем `return` и по ошибке.
+pub struct TestRun<'a> {
+    state: &'a AppState,
+}
+
+impl<'a> TestRun<'a> {
+    /// None — прогон уже идёт, начинать второй нельзя.
+    pub fn acquire(state: &'a AppState) -> Option<Self> {
+        let mut testing = state.testing.lock().unwrap();
+        if *testing {
+            return None;
+        }
+        *testing = true;
+        drop(testing);
+        *state.test_cancel.lock().unwrap() = false;
+        Some(TestRun { state })
+    }
+
+    pub fn cancelled(&self) -> bool {
+        *self.state.test_cancel.lock().unwrap()
+    }
+}
+
+impl Drop for TestRun<'_> {
+    fn drop(&mut self) {
+        *self.state.test_pid.lock().unwrap() = None;
+        *self.state.testing.lock().unwrap() = false;
     }
 }
 

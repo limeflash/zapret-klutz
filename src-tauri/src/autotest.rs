@@ -13,6 +13,13 @@ const IDLE_GATE_SEC: u64 = 5 * 60;
 const WARNING_LEAD: Duration = Duration::from_secs(2 * 60);
 const TICK: Duration = Duration::from_secs(30 * 60);
 const FIRST_TICK: Duration = Duration::from_secs(2 * 60);
+/// Сколько не трогать пользователя после отменённой попытки. Предупреждение
+/// уходит до перепроверки, а отметку о прогоне ставим только после неё — без
+/// этой паузы вернувшийся к компьютеру человек получал бы «Скоро автопрогон»
+/// каждые полчаса, и прогон при этом так и не начинался.
+const RETRY_AFTER_ABORT: Duration = Duration::from_secs(6 * 60 * 60);
+
+static LAST_ABORTED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
 /// Сколько секунд не было ввода с клавиатуры/мыши.
 #[cfg(target_os = "windows")]
@@ -92,6 +99,9 @@ fn maybe_run(app: &AppHandle) {
     if crate::service::service_conflict() {
         return;
     }
+    if LAST_ABORTED.lock().unwrap().map_or(false, |t| t.elapsed() < RETRY_AFTER_ABORT) {
+        return;
+    }
 
     crate::notify::send_from(
         app,
@@ -103,8 +113,17 @@ fn maybe_run(app: &AppHandle) {
     // Перепроверяем: пользователь мог вернуться, или что-то другое могло
     // начать тест либо переключение — влезать в любом случае не надо.
     if !is_clear(app) || crate::service::service_conflict() {
+        *LAST_ABORTED.lock().unwrap() = Some(std::time::Instant::now());
         return;
     }
+
+    // Тот же замок, что берёт кнопка «Подобрать стратегию». Раньше здесь
+    // стояло присваивание `testing = true` в обход него — и два прогона
+    // PowerShell могли идти одновременно, перетирая друг другу общий PID.
+    let Some(_run) = crate::state::TestRun::acquire(&state) else {
+        *LAST_ABORTED.lock().unwrap() = Some(std::time::Instant::now());
+        return;
+    };
 
     {
         let mut p = state.persisted.lock().unwrap();
@@ -112,9 +131,9 @@ fn maybe_run(app: &AppHandle) {
     }
     save_state(app, &state);
 
-    *state.testing.lock().unwrap() = true;
+    let before = state.persisted.lock().unwrap().active_config.clone();
     let result = crate::tests::run_test_script(app, std::path::Path::new(&root), mode == "dpi", None);
-    *state.testing.lock().unwrap() = false;
+    crate::commands::restore_after_tests(app, before);
 
     match result {
         Ok(text) => {

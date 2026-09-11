@@ -8,6 +8,62 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Декодирует вывод консольной утилиты. Сначала UTF-8, а если не вышло —
+/// кодовая страница OEM: на русской Windows sc, net и netsh пишут в CP866, и
+/// `from_utf8_lossy` превращал их сообщения в ромбики — включая текст ошибки,
+/// который потом показывали пользователю.
+pub fn decode_console(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(s) = decode_oem(bytes) {
+        return s;
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn decode_oem(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+    const CP_OEMCP: u32 = 1;
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    unsafe {
+        let need = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), bytes.len() as i32, std::ptr::null_mut(), 0);
+        if need <= 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; need as usize];
+        let got = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), bytes.len() as i32, buf.as_mut_ptr(), need);
+        if got <= 0 {
+            return None;
+        }
+        String::from_utf16(&buf[..got as usize]).ok()
+    }
+}
+
+/// Читает поток построчно и отдаёт уже декодированные строки.
+///
+/// `lines()` здесь не годится: он строгий UTF-8, а `.flatten()` МОЛЧА
+/// выбрасывает каждую строку, которую не удалось разобрать, — на русской
+/// Windows это все строки с кириллицей, и они просто исчезали из живого лога.
+pub fn for_each_line<R: std::io::Read>(r: R, mut f: impl FnMut(String)) {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(r);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = decode_console(&buf);
+        f(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+}
+
 /// Запускает команду, отдаёт stdout. Ошибку не считаем фатальной — многие
 /// из этих утилит возвращают ненулевой код на «ничего не найдено».
 pub fn run(program: &str, args: &[&str]) -> String {
@@ -18,8 +74,8 @@ pub fn run(program: &str, args: &[&str]) -> String {
     cmd.creation_flags(CREATE_NO_WINDOW);
     match cmd.output() {
         Ok(out) => {
-            let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-            s.push_str(&String::from_utf8_lossy(&out.stderr));
+            let mut s = decode_console(&out.stdout);
+            s.push_str(&decode_console(&out.stderr));
             s
         }
         Err(_) => String::new(),

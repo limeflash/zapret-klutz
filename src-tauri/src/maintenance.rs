@@ -91,7 +91,10 @@ pub fn update_hosts() -> HostsUpdate {
         let tmp = std::env::temp_dir().join("zapret_hosts.txt");
         if fs::write(&tmp, &text).is_ok() {
             let _ = Command::new("notepad.exe").arg(&tmp).spawn();
-            let _ = Command::new("explorer.exe").args(["/select,", hosts_path]).spawn();
+            // Именно одним аргументом: explorer разбирает командную строку
+            // сам и на «/select,» с пробелом перед путём открывает папку по
+            // умолчанию вместо того, чтобы подсветить файл.
+            let _ = Command::new("explorer.exe").arg(format!("/select,{hosts_path}")).spawn();
         }
     }
     HostsUpdate { ok: true, error: None, needs_update }
@@ -157,14 +160,30 @@ pub struct CacheClear {
     pub cleared: Vec<String>,
 }
 
+const DISCORD_IMAGES: [&str; 3] = ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe"];
+
 pub fn clear_discord_cache() -> CacheClear {
-    sys::run("taskkill", &["/IM", "Discord.exe", "/F"]);
+    // Все каналы, а не только стабильный: PTB и Canary лежат отдельно.
+    for image in DISCORD_IMAGES {
+        sys::run("taskkill", &["/IM", image, "/F"]);
+    }
+    // taskkill возвращается раньше, чем процесс действительно исчезает, и
+    // удаление падало на «файл занят», молча отдавая пустой список.
+    for _ in 0..20 {
+        if !DISCORD_IMAGES.iter().any(|i| sys::proc_running(i)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
     let base = std::env::var("APPDATA").unwrap_or_default();
     let mut cleared = Vec::new();
-    for dir in ["Cache", "Code Cache", "GPUCache"] {
-        let p = Path::new(&base).join("discord").join(dir);
-        if p.exists() && fs::remove_dir_all(&p).is_ok() {
-            cleared.push(dir.to_string());
+    for channel in ["discord", "discordptb", "discordcanary"] {
+        for dir in ["Cache", "Code Cache", "GPUCache"] {
+            let p = Path::new(&base).join(channel).join(dir);
+            if p.exists() && fs::remove_dir_all(&p).is_ok() {
+                cleared.push(format!("{channel}/{dir}"));
+            }
         }
     }
     CacheClear { ok: true, cleared }

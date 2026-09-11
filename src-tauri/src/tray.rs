@@ -108,6 +108,8 @@ struct Snapshot {
     running: bool,
     active: Option<String>,
     state: TrayState,
+    /// Была ли вообще хоть одна проверка связи для текущего запуска.
+    checked: bool,
     targets: Vec<(String, bool, u64)>,
     switch_to: Vec<String>,
     tg_running: bool,
@@ -138,15 +140,17 @@ fn snapshot(app: &AppHandle) -> Snapshot {
         (p.active_config.clone(), p.root_path.clone())
     };
     let last = *st.last_check.lock().unwrap();
-    let state = if !running {
-        TrayState::Idle
-    } else {
-        match last {
-            Some((0, total)) if total > 0 => TrayState::Bad,
-            Some((ok, total)) if ok < total => TrayState::Warn,
-            _ => TrayState::Ok,
-        }
+    // None — проверок ещё не было. Раньше этот случай проваливался в ветку
+    // `_ => Ok`, и иконка уверенно горела зелёным «всё отвечает», ничего не
+    // проверив: первые секунды после запуска и после каждого включения.
+    let state = match (running, last) {
+        (false, _) => TrayState::Idle,
+        (true, None) => TrayState::Warn,
+        (true, Some((0, total))) if total > 0 => TrayState::Bad,
+        (true, Some((ok, total))) if ok < total => TrayState::Warn,
+        (true, _) => TrayState::Ok,
     };
+    let checked = last.is_some();
     let targets = if running { st.last_targets.lock().unwrap().clone() } else { vec![] };
 
     // Лучшие из последнего прогона — тот же источник, которому доверяет
@@ -165,16 +169,17 @@ fn snapshot(app: &AppHandle) -> Snapshot {
 
     let tg_running = st.tgws_pid.lock().unwrap().is_some();
 
-    Snapshot { running, active, state, targets, switch_to, tg_running }
+    Snapshot { running, active, state, checked, targets, switch_to, tg_running }
 }
 
 fn tooltip(s: &Snapshot) -> String {
     let name = s.active.as_deref().map(pretty).unwrap_or_else(|| "вариант не выбран".into());
-    let status = match (s.running, s.state) {
-        (false, _) => "обход выключен".to_string(),
-        (true, TrayState::Bad) => format!("цели не отвечают · {name}"),
-        (true, TrayState::Warn) => format!("работает с ошибками · {name}"),
-        (true, _) => format!("работает · {name}"),
+    let status = match (s.running, s.checked, s.state) {
+        (false, _, _) => "обход выключен".to_string(),
+        (true, false, _) => format!("проверяю связь · {name}"),
+        (true, _, TrayState::Bad) => format!("цели не отвечают · {name}"),
+        (true, _, TrayState::Warn) => format!("работает с ошибками · {name}"),
+        (true, _, _) => format!("работает · {name}"),
     };
     let mut t = format!("Klutz — {status}");
     if s.tg_running {
@@ -361,11 +366,15 @@ pub fn tray_menu_action(app: AppHandle, id: String) {
             });
         }
         "quit" => {
-            // Полный выход гасит и обход, и прокси — иначе процессы
-            // остаются жить без единого видимого окна.
-            winws::kill_winws(&app);
-            crate::tgws::stop(&app);
-            app.exit(0);
+            // В отдельном потоке, как и соседние ветки: команда объявлена
+            // без async, то есть идёт в главном потоке, а kill_winws и
+            // tgws::stop синхронно ждут два taskkill — окно на это время
+            // замирало.
+            std::thread::spawn(move || {
+                winws::kill_winws(&app);
+                crate::tgws::stop(&app);
+                app.exit(0);
+            });
         }
         other => {
             if let Some(config) = other.strip_prefix("switch:") {

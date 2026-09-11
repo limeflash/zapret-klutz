@@ -1,8 +1,9 @@
 //! Фоновая проверка связи и самолечение.
 //!
-//! Стратегия считается «просевшей», когда большинство ключевых целей перестало
-//! отвечать. Одна неудачная проверка — обычно просто сетевая икота, поэтому
-//! требуем несколько подряд, прежде чем что-то делать.
+//! Стратегия считается «просевшей», когда какой-нибудь ключевой сервис
+//! (Discord, YouTube) перестал отвечать целиком. Одна неудачная проверка —
+//! обычно просто сетевая икота, поэтому требуем несколько подряд, прежде чем
+//! что-то делать.
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -17,20 +18,48 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn is_core(name: &str) -> bool {
+/// К какому сервису относится цель. Признак — имя, а его пользователь может
+/// переименовать, поэтому ниже есть запасной путь.
+fn service_of(name: &str) -> Option<&'static str> {
     let n = name.to_lowercase();
-    n.starts_with("discord") || n.starts_with("youtube")
+    if n.starts_with("discord") {
+        Some("discord")
+    } else if n.starts_with("youtube") {
+        Some("youtube")
+    } else {
+        None
+    }
+}
+
+/// Просадка — когда хоть один ключевой сервис перестал отвечать целиком.
+///
+/// Считать долей от общего числа хостов нельзя: у Discord их четыре, у
+/// YouTube три, и условие «ответило меньше половины» пропускало «Discord
+/// лёг весь» (3 из 7), но никогда не срабатывало на «YouTube лёг весь»
+/// (4 из 7) — переключение было асимметричным.
+fn is_degraded(results: &[targets::TargetResult]) -> bool {
+    let mut groups: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+    for r in results {
+        let e = groups.entry(service_of(&r.name).unwrap_or("прочие")).or_insert((0, 0));
+        e.1 += 1;
+        if r.ok {
+            e.0 += 1;
+        }
+    }
+    groups.values().any(|(ok, total)| *total > 0 && *ok == 0)
 }
 
 pub fn start(app: AppHandle) {
     std::thread::spawn(move || loop {
+        // Проверяем сразу, а не после первого сна: иначе полминуты после
+        // запуска приложение вообще не знает состояния связи.
+        tick(&app);
         let interval = {
             let state = app.state::<AppState>();
             let p = state.persisted.lock().unwrap();
             p.auto_switch.as_ref().map(|a| a.interval_sec).unwrap_or(30)
         };
         std::thread::sleep(std::time::Duration::from_secs(interval.clamp(10, 600)));
-        tick(&app);
     });
 }
 
@@ -45,6 +74,7 @@ fn tick(app: &AppHandle) {
     if !winws::is_winws_running() {
         *state.last_check.lock().unwrap() = None;
         state.last_targets.lock().unwrap().clear();
+        *state.last_check_at.lock().unwrap() = 0;
         *state.degraded_ticks.lock().unwrap() = 0;
         crate::tray::refresh(app);
         return;
@@ -54,7 +84,14 @@ fn tick(app: &AppHandle) {
         let p = state.persisted.lock().unwrap();
         p.game_targets.clone().unwrap_or_else(targets::default_targets)
     };
-    let core: Vec<_> = list.into_iter().filter(|t| is_core(&t.name)).collect();
+    // Если пользователь переименовал все цели, признака «ключевая» не
+    // остаётся. Раньше на этом месте был ранний return — и мониторинг тихо
+    // умирал навсегда: трей застывал на старых данных, самолечение не
+    // срабатывало, сообщения об этом не было. Берём тогда весь список.
+    let mut core: Vec<_> = list.iter().filter(|t| service_of(&t.name).is_some()).cloned().collect();
+    if core.is_empty() {
+        core = list;
+    }
     if core.is_empty() {
         return;
     }
@@ -63,13 +100,14 @@ fn tick(app: &AppHandle) {
     let total = results.len();
     *state.last_check.lock().unwrap() = Some((ok, total));
     *state.last_targets.lock().unwrap() = results.iter().map(|r| (r.name.clone(), r.ok, r.ms)).collect();
+    *state.last_check_at.lock().unwrap() = now_ms();
     crate::tray::refresh(app);
-    let _ = app.emit("monitor-tick", serde_json::json!({ "ok": ok, "total": total }));
 
-    let degraded = total > 0 && ok * 2 < total;
+    let degraded = is_degraded(&results);
     if !degraded {
         *state.degraded_ticks.lock().unwrap() = 0;
         state.healing_attempts.lock().unwrap().clear();
+        *state.heal_exhausted.lock().unwrap() = false;
         return;
     }
 
@@ -109,16 +147,19 @@ fn attempt_switch(app: &AppHandle) {
         .find(|c| Some(c) != current.as_ref() && !tried.contains(c) && root.join(c).exists());
 
     let Some(next) = next else {
-        // Перепробовали всё — дальше молотить бессмысленно, выключаем
-        // самолечение, чтобы не крутиться вхолостую.
-        if !tried.is_empty() {
-            let mut p = state.persisted.lock().unwrap();
-            if let Some(a) = p.auto_switch.as_mut() {
-                a.enabled = false;
-            }
-            drop(p);
-            save_state(app, &state);
-            state.healing_attempts.lock().unwrap().clear();
+        // Перепробовали всё — молотить дальше бессмысленно, но и выключать
+        // самолечение нельзя: раньше здесь стояло `a.enabled = false` с
+        // записью на диск, и получасовой обрыв связи навсегда гасил чужую
+        // настройку. Список испробованного и так держит нас в покое: пока
+        // связь не вернётся, следующей стратегии не найдётся. Как только
+        // цели снова ответят, tick() очистит его сам.
+        if !tried.is_empty() && !*state.heal_exhausted.lock().unwrap() {
+            *state.heal_exhausted.lock().unwrap() = true;
+            crate::notify::send_from(
+                app,
+                "Самолечение перебрало все стратегии",
+                "Ни одна из последнего прогона не вернула связь. Похоже, дело не в стратегии — проверь интернет или прогони тесты заново.",
+            );
         }
         return;
     };
@@ -126,7 +167,11 @@ fn attempt_switch(app: &AppHandle) {
     state.healing_attempts.lock().unwrap().push(next.clone());
     *state.degraded_ticks.lock().unwrap() = 0;
 
-    if apply_config(app, &next).is_ok() {
+    let applied = apply_config(app, &next);
+    // В журнал попадает и неудача: раньше запись делалась только в ветке
+    // успеха и всегда с ok: true, поэтому серия провалившихся переключений
+    // выглядела для пользователя полной тишиной.
+    {
         let mut p = state.persisted.lock().unwrap();
         let log = p.heal_log.get_or_insert_with(Vec::new);
         log.push(HealEntry {
@@ -134,7 +179,7 @@ fn attempt_switch(app: &AppHandle) {
             kind: "switch".into(),
             from: current.clone(),
             to: Some(next.clone()),
-            ok: true,
+            ok: applied.is_ok(),
         });
         if log.len() > 50 {
             let cut = log.len() - 50;
@@ -142,6 +187,9 @@ fn attempt_switch(app: &AppHandle) {
         }
         drop(p);
         save_state(app, &state);
+    }
+
+    if applied.is_ok() {
         crate::notify::send_from(
             app,
             "Переключился на другую стратегию",

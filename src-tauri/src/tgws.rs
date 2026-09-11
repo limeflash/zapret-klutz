@@ -2,7 +2,6 @@
 //! proxy/tg_ws_proxy.py, без трея и окон, управляется только флагами).
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -59,24 +58,48 @@ impl Default for TgSettings {
     }
 }
 
-/// 16 байт hex — формат, который ждёт клиент Telegram. Ключи SipHash у
-/// RandomState берутся из системного ГСЧ, так что как PRF этого хватает для
-/// локального секрета прокси без отдельной крейты rand.
+/// Системный ГСЧ. `RandomState` для этого не годился: std засевает ключи
+/// SipHash из ОС ОДИН раз на поток, а дальше просто инкрементирует счётчик —
+/// два блока подряд получали связанные ключи, и вся энтропия сводилась к
+/// одному посеву плюс метке времени, а не к 128 битам, как выглядело.
+#[cfg(target_os = "windows")]
+fn os_random(buf: &mut [u8]) -> bool {
+    use windows_sys::Win32::Security::Cryptography::ProcessPrng;
+    unsafe { ProcessPrng(buf.as_mut_ptr(), buf.len()) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn os_random(buf: &mut [u8]) -> bool {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .is_ok()
+}
+
+/// 16 байт hex — формат, который ждёт клиент Telegram.
 pub fn random_secret() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let mut out = String::with_capacity(32);
-    for i in 0..2u64 {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u64(i);
-        h.write_u128(nanos);
-        out.push_str(&format!("{:016x}", h.finish()));
+    let mut bytes = [0u8; 16];
+    if !os_random(&mut bytes) {
+        // ГСЧ ОС не отвечает — случай почти невозможный, но пустой секрет
+        // хуже слабого: добираем тем, что есть, и не роняем приложение.
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        for (i, chunk) in bytes.chunks_mut(8).enumerate() {
+            let mut h = RandomState::new().build_hasher();
+            h.write_u64(i as u64);
+            h.write_u128(nanos);
+            chunk.copy_from_slice(&h.finish().to_le_bytes()[..chunk.len()]);
+        }
     }
-    out
+    bytes.iter().fold(String::with_capacity(32), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 pub fn is_valid_secret(s: &str) -> bool {
@@ -142,6 +165,17 @@ pub fn probe_health(s: &TgSettings) -> bool {
     addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_millis(2500)).is_ok())
 }
 
+/// Имя образа процесса по PID — чтобы не принять за свой прокси чужую
+/// программу, занявшую тот же порт.
+fn image_name(pid: u32) -> Option<String> {
+    let out = sys::run("tasklist", &["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+    // Формат CSV: "имя.exe","PID","сессия",…
+    out.lines()
+        .find(|l| l.starts_with('"'))
+        .and_then(|l| l.split('"').nth(1))
+        .map(|s| s.to_lowercase())
+}
+
 /// PID того, кто реально слушает порт. Нужен, чтобы подобрать процесс,
 /// переживший наш прошлый запуск (падение, убийство приложения) — иначе он
 /// продолжит обслуживать трафик, пока интерфейс показывает «выключено».
@@ -176,8 +210,15 @@ pub fn kill_tree(pid: u32) {
 
 pub fn start(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    if state.tgws_pid.lock().unwrap().is_some() {
-        return Ok(());
+    {
+        let mut guard = state.tgws_pid.lock().unwrap();
+        match *guard {
+            Some(pid) if pid_alive(pid) => return Ok(()),
+            // Записанный процесс уже мёртв (усыновлённый прокси упал, и
+            // некому было это заметить) — забываем его и поднимаем заново.
+            Some(_) => *guard = None,
+            None => {}
+        }
     }
     ensure_settings(app);
     let settings = state.persisted.lock().unwrap().tgws.clone().unwrap_or_default();
@@ -214,9 +255,6 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
 
-    for stream in [child.stdout.take().map(Box::new as fn(_) -> _), None].into_iter().flatten() {
-        let _ = stream;
-    }
     if let Some(out) = child.stdout.take() {
         pipe_log(app.clone(), out);
     }
@@ -254,18 +292,10 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
 }
 
 fn pipe_log(app: AppHandle, out: std::process::ChildStdout) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(out).lines().flatten() {
-            push_line(&app, line);
-        }
-    });
+    std::thread::spawn(move || sys::for_each_line(out, |line| push_line(&app, line)));
 }
 fn pipe_log_err(app: AppHandle, out: std::process::ChildStderr) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(out).lines().flatten() {
-            push_line(&app, line);
-        }
-    });
+    std::thread::spawn(move || sys::for_each_line(out, |line| push_line(&app, line)));
 }
 
 fn push_line(app: &AppHandle, line: String) {
@@ -295,6 +325,10 @@ pub fn stop(app: &AppHandle) {
 }
 
 /// Подбирает процесс, оставшийся от прошлого запуска приложения.
+///
+/// Одного совпадения по порту мало: на нём может сидеть что угодно чужое, а
+/// «Остановить» потом валит дерево процессов через taskkill /T /F из-под
+/// администратора. Поэтому сверяем имя образа.
 pub fn adopt_existing(app: &AppHandle) {
     let state = app.state::<AppState>();
     if state.tgws_pid.lock().unwrap().is_some() {
@@ -302,9 +336,18 @@ pub fn adopt_existing(app: &AppHandle) {
     }
     ensure_settings(app);
     let settings = state.persisted.lock().unwrap().tgws.clone().unwrap_or_default();
-    if let Some(pid) = pid_listening_on(settings.port) {
-        *state.tgws_pid.lock().unwrap() = Some(pid);
-        let _ = app.emit("tgwsproxy-state-changed", serde_json::json!({ "running": true }));
-        crate::tray::refresh(app);
+    let Some(pid) = pid_listening_on(settings.port) else { return };
+    if image_name(pid).as_deref() != Some("tgwsproxyheadless.exe") {
+        return;
     }
+    *state.tgws_pid.lock().unwrap() = Some(pid);
+    let _ = app.emit("tgwsproxy-state-changed", serde_json::json!({ "running": true }));
+    crate::tray::refresh(app);
+}
+
+/// Жив ли процесс, который мы считаем своим прокси. Усыновлённый PID своего
+/// наблюдателя не имеет, поэтому без этой проверки «работает» залипало бы
+/// навсегда, а «Запустить» молча ничего не делала.
+pub fn pid_alive(pid: u32) -> bool {
+    image_name(pid).is_some()
 }
