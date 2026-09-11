@@ -52,10 +52,12 @@
 
   window.zapret = {
     getPathForFile: (f) => f.name,
-    getVersions: async () => ({ app: '1.0.0', zapret: '1.9.9c', tgws: '1.10.1' }),
+    getVersions: async () => ({ app: '1.1.0', zapret: '1.9.9c', tgws: '1.10.2' }),
+    checkKlutzUpdate: async () => ({ current: '1.1.0', latest: '1.2.0', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' }),
     checkComponentUpdates: async () => ({
+      klutz: { current: '1.1.0', latest: '1.1.0', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' },
       zapret: { current: '1.9.9c', latest: '1.9.9c', error: null },
-      tgws: { current: '1.10.1', latest: '1.10.2', error: null },
+      tgws: { current: '1.10.2', latest: '1.10.2', error: null },
     }),
     copyText: async () => ({ ok: true }),
 

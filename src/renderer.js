@@ -642,6 +642,9 @@ const aboutOverlay = $('aboutOverlay');
 function fillVersions(v) {
   $('tbVersion').textContent = v.app;
   $('aboutAppVersion').textContent = v.app;
+  const k = $('aboutKlutzVer');
+  k.textContent = v.app;
+  k.className = '';
   const z = $('aboutZapretVer');
   z.textContent = v.zapret || 'не загружен';
   z.className = '';
@@ -661,10 +664,39 @@ $('aboutBtn').onclick = async () => {
 aboutOverlay.onclick = (e) => {
   if (e.target === aboutOverlay) aboutOverlay.classList.add('hidden');
 };
-$('aboutGithubBtn').onclick = () => window.zapret.openExternalUrl('https://github.com/Flowseal/zapret-discord-youtube');
-$('aboutReportBtn').onclick = () => window.zapret.openExternalUrl('https://github.com/Flowseal/zapret-discord-youtube/issues');
-// Сверяет обе части — zapret-discord-youtube и встроенный TgWsProxy — с
-// последними версиями у Flowseal, результат прямо в строках окна.
+// Проблемы с Klutz — к нам, а не к Flowseal: его проекты тут ни при чём.
+const KLUTZ_REPO_URL = 'https://github.com/vbu00/zapret-klutz';
+$('aboutGithubBtn').onclick = () => window.zapret.openExternalUrl(KLUTZ_REPO_URL);
+$('aboutReportBtn').onclick = () => window.zapret.openExternalUrl(`${KLUTZ_REPO_URL}/issues`);
+// Сравнение версий по частям: 1.10 новее 1.9, «1.9.9c» новее «1.9.9».
+// Одного равенства мало — сборка новее опубликованной выглядела бы
+// «устаревшей».
+function cmpVer(a, b) {
+  const parts = (v) => String(v || '').trim().replace(/^v/i, '').toLowerCase().match(/\d+|[a-z]+/g) || [];
+  const pa = parts(a);
+  const pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i];
+    const y = pb[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = /^\d+$/.test(x);
+    const ny = /^\d+$/.test(y);
+    if (nx && ny) {
+      const d = Number(x) - Number(y);
+      if (d) return Math.sign(d);
+    } else if (x !== y) {
+      return nx ? 1 : ny ? -1 : x < y ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+const isNewer = (u) => !!(u && u.current && u.latest && cmpVer(u.latest, u.current) > 0);
+const KLUTZ_RELEASES_URL = `${KLUTZ_REPO_URL}/releases/latest`;
+
+// Сверяет Klutz и обе встроенные части с последними версиями на GitHub,
+// результат прямо в строках окна.
 $('aboutUpdateBtn').onclick = async () => {
   const btn = $('aboutUpdateBtn');
   btn.disabled = true;
@@ -673,32 +705,36 @@ $('aboutUpdateBtn').onclick = async () => {
   btn.disabled = false;
   btn.textContent = 'Проверить обновления';
 
-  const norm = (v) => String(v || '').trim().replace(/^v/i, '').toLowerCase();
   const show = (el, u) => {
     el.className = '';
     if (!u.current) {
       el.textContent = 'не загружен';
     } else if (!u.latest) {
       el.textContent = `${u.current} · не удалось проверить`;
-    } else if (norm(u.latest) === norm(u.current)) {
-      el.textContent = `${u.current} · актуальная`;
-      el.className = 'fresh';
-    } else {
+    } else if (isNewer(u)) {
       el.textContent = `${u.current} → есть ${u.latest}`;
       el.className = 'upd';
+    } else {
+      el.textContent = `${u.current} · актуальная`;
+      el.className = 'fresh';
     }
   };
+  show($('aboutKlutzVer'), res.klutz);
   show($('aboutZapretVer'), res.zapret);
   show($('aboutTgwsVer'), res.tgws);
+  $('aboutBtn').classList.toggle('has-update', isNewer(res.klutz));
 
-  const newer = (u) => u.current && u.latest && norm(u.latest) !== norm(u.current);
   const note = $('aboutUpdateNote');
   const parts = [];
-  if (newer(res.zapret)) parts.push('<button class="link-btn" id="aboutGoUpdateZapret">Обновить zapret в Настройках →</button>');
-  if (newer(res.tgws)) parts.push('<span>Новый TgWsProxy придёт с обновлением Klutz — он встроен в приложение.</span>');
-  if (!newer(res.zapret) && !newer(res.tgws) && res.zapret.latest && res.tgws.latest) parts.push('<span>Всё актуально.</span>');
+  if (isNewer(res.klutz)) parts.push(`<button class="link-btn" id="aboutGetKlutz">Скачать Klutz ${esc(res.klutz.latest)} →</button>`);
+  if (isNewer(res.zapret)) parts.push('<button class="link-btn" id="aboutGoUpdateZapret">Обновить zapret в Настройках →</button>');
+  if (isNewer(res.tgws)) parts.push('<span>Новый TgWsProxy придёт с обновлением Klutz — он встроен в приложение.</span>');
+  const all = [res.klutz, res.zapret, res.tgws];
+  if (!all.some(isNewer) && all.every((u) => u.latest)) parts.push('<span>Всё актуально.</span>');
   note.innerHTML = parts.join('<br>');
   note.classList.toggle('hidden', !parts.length);
+  const getKlutz = $('aboutGetKlutz');
+  if (getKlutz) getKlutz.onclick = () => window.zapret.openExternalUrl(res.klutz.url || KLUTZ_RELEASES_URL);
   const go = $('aboutGoUpdateZapret');
   if (go) {
     go.onclick = () => {
@@ -709,6 +745,41 @@ $('aboutUpdateBtn').onclick = async () => {
     };
   }
 };
+
+// Раз в сутки при запуске Klutz сам смотрит, не вышла ли новая версия.
+// Чаще незачем, да и GitHub ограничивает анонимные запросы. Найденную
+// версию запоминаем, чтобы точка на «О программе» не пропадала до обновления.
+const KLUTZ_CHECKED_KEY = 'klutzUpdateCheckedAt';
+const KLUTZ_SEEN_KEY = 'klutzLatestSeen';
+
+async function checkKlutzUpdateDaily() {
+  const v = await window.zapret.getVersions();
+  let last = 0;
+  let seen = null;
+  try {
+    last = Number(localStorage.getItem(KLUTZ_CHECKED_KEY)) || 0;
+    seen = localStorage.getItem(KLUTZ_SEEN_KEY);
+  } catch {}
+  if (seen && cmpVer(seen, v.app) > 0) $('aboutBtn').classList.add('has-update');
+  if (Date.now() - last < 24 * 3600 * 1000) return;
+
+  const u = await window.zapret.checkKlutzUpdate();
+  if (!u || !u.latest) return; // нет сети — попробуем при следующем запуске
+  try {
+    localStorage.setItem(KLUTZ_CHECKED_KEY, String(Date.now()));
+    localStorage.setItem(KLUTZ_SEEN_KEY, u.latest);
+  } catch {}
+  $('aboutBtn').classList.toggle('has-update', isNewer(u));
+  if (isNewer(u)) {
+    showToast(`Вышел Klutz ${u.latest}`, 'info', {
+      body: `У вас ${u.current}. Новая версия ставится поверх, настройки сохранятся.`,
+      actionLabel: 'Скачать',
+      onAction: () => window.zapret.openExternalUrl(u.url || KLUTZ_RELEASES_URL),
+    });
+  }
+}
+// Не в первые секунды: при старте и так идут проверка связи и подъём прокси.
+setTimeout(checkKlutzUpdateDaily, 15000);
 
 // ─────────── Главная: «Что обходим» и карточки автоматизации ───────────
 // These proxy the real controls elsewhere (Стратегии, Telegram, Настройки)

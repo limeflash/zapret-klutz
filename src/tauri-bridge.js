@@ -134,6 +134,7 @@
     openReleaseFolder: () => invoke('open_release_folder'),
     getVersions: () => invoke('get_versions'),
     checkComponentUpdates: () => invoke('check_component_updates'),
+    checkKlutzUpdate: () => invoke('check_klutz_update'),
     startTgwsproxy: () => invoke('start_tgwsproxy'),
     stopTgwsproxy: () => invoke('stop_tgwsproxy'),
     restartTgwsproxy: () => invoke('restart_tgwsproxy'),

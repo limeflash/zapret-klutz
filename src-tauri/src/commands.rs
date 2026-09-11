@@ -1082,17 +1082,48 @@ pub struct ComponentUpdate {
     current: Option<String>,
     latest: Option<String>,
     error: Option<String>,
+    /// Где взять новую версию — страница релиза.
+    url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ComponentUpdates {
+    klutz: ComponentUpdate,
     zapret: ComponentUpdate,
     tgws: ComponentUpdate,
 }
 
-/// Сверяет обе встроенные части с последними версиями у Flowseal.
+/// Репозиторий самого Klutz: выпуски — GitHub-релизы с тегом vX.Y.Z.
+const KLUTZ_REPO: &str = "vbu00/zapret-klutz";
+
+/// Последний релиз Klutz на GitHub против версии этой сборки.
+fn klutz_update(app: &AppHandle) -> ComponentUpdate {
+    let current = Some(app.package_info().version.to_string());
+    let fetched = crate::maintenance::http_get(&format!("https://api.github.com/repos/{KLUTZ_REPO}/releases/latest"))
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|_| "GitHub ответил неожиданным форматом.".to_string())
+        });
+    match fetched {
+        Ok(v) => {
+            let latest = v.get("tag_name").and_then(|t| t.as_str()).map(|t| t.trim_start_matches('v').to_string());
+            let url = v.get("html_url").and_then(|u| u.as_str()).map(str::to_string);
+            let error = latest.is_none().then(|| "В ответе GitHub нет версии.".to_string());
+            ComponentUpdate { current, latest, error, url }
+        }
+        Err(e) => ComponentUpdate { current, latest: None, error: Some(e), url: None },
+    }
+}
+
+/// Проверка при запуске — только Klutz, без zapret и прокси.
 #[tauri::command(async)]
-pub fn check_component_updates(state: State<AppState>) -> ComponentUpdates {
+pub fn check_klutz_update(app: AppHandle) -> ComponentUpdate {
+    klutz_update(&app)
+}
+
+/// Сверяет Klutz и обе встроенные части с последними версиями на GitHub.
+#[tauri::command(async)]
+pub fn check_component_updates(app: AppHandle, state: State<AppState>) -> ComponentUpdates {
     let zapret = match root_of(&state) {
         Some(root) => {
             let u = crate::maintenance::check_updates(&root);
@@ -1100,16 +1131,23 @@ pub fn check_component_updates(state: State<AppState>) -> ComponentUpdates {
                 current: Some(u.local),
                 latest: if u.ok { Some(u.remote) } else { None },
                 error: u.error,
+                url: if u.release_url.is_empty() { None } else { Some(u.release_url) },
             }
         }
-        None => ComponentUpdate { current: None, latest: None, error: Some("Релиз zapret не загружен.".into()) },
+        None => ComponentUpdate {
+            current: None,
+            latest: None,
+            error: Some("Релиз zapret не загружен.".into()),
+            url: None,
+        },
     };
     let current = Some(crate::tgws::BUNDLED_VERSION.to_string());
+    let tgws_url = Some("https://github.com/Flowseal/tg-ws-proxy/releases/latest".to_string());
     let tgws = match crate::tgws::latest_upstream() {
-        Ok(latest) => ComponentUpdate { current, latest: Some(latest), error: None },
-        Err(e) => ComponentUpdate { current, latest: None, error: Some(e) },
+        Ok(latest) => ComponentUpdate { current, latest: Some(latest), error: None, url: tgws_url },
+        Err(e) => ComponentUpdate { current, latest: None, error: Some(e), url: tgws_url },
     };
-    ComponentUpdates { zapret, tgws }
+    ComponentUpdates { klutz: klutz_update(&app), zapret, tgws }
 }
 
 #[tauri::command(async)]

@@ -253,6 +253,17 @@ html.simple .adv-only { display: none !important; }
   transition: background .12s, color .12s;
 }
 .icon-btn:hover { background: var(--pill); color: var(--tx); }
+/* Точка на «О программе»: вышла новая версия Klutz. */
+.icon-btn.has-update { position: relative; }
+.icon-btn.has-update::after {
+  content: '';
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 2px var(--app);
+}
 
 .icon-sun { display: none; }
 html[data-theme="dark"] .icon-moon { display: none; }

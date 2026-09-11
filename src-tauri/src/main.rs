@@ -158,6 +158,7 @@ fn main() {
             commands::copy_text,
             commands::get_versions,
             commands::check_component_updates,
+            commands::check_klutz_update,
             tray::tray_menu_state,
             tray::tray_menu_ready,
             tray::tray_menu_hide,
