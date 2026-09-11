@@ -12,3 +12,4 @@ __pycache__/
 
 # Локальные настройки Claude Code
 .claude/settings.local.json
+tools/tgwsproxy-build/pyinstaller.log

@@ -20,7 +20,7 @@ pub const DEFAULT_DC_IPS: [&str; 2] = ["2:149.154.167.220", "4:149.154.167.220"]
 /// Версия tg-ws-proxy (Flowseal), из которой собран встроенный
 /// TgWsProxyHeadless.exe — `__version__` в proxy/__init__.py снимка из
 /// tools/tgwsproxy-build. Меняется только вместе с пересборкой exe.
-pub const BUNDLED_VERSION: &str = "1.10.1";
+pub const BUNDLED_VERSION: &str = "1.10.2";
 
 /// Последний релиз tg-ws-proxy у Flowseal — чтобы видеть, что встроенный
 /// прокси отстал и Klutz пора пересобрать.
