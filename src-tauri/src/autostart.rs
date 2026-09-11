@@ -12,8 +12,14 @@ pub fn is_enabled() -> bool {
 
 pub fn set_enabled(enabled: bool) -> Result<(), String> {
     if !enabled {
-        sys::run("schtasks", &["/Delete", "/TN", TASK_NAME, "/F"]);
-        return Ok(());
+        let out = sys::run("schtasks", &["/Delete", "/TN", TASK_NAME, "/F"]);
+        // Раньше результат игнорировался: отказ по правам возвращал успех,
+        // а задача продолжала поднимать приложение при каждом входе.
+        return if is_enabled() {
+            Err(if out.trim().is_empty() { "не удалось удалить задачу автозапуска".into() } else { out })
+        } else {
+            Ok(())
+        };
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let tr = format!("\"{}\" --autostart", exe.display());

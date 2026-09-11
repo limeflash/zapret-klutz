@@ -254,6 +254,19 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let pid = child.id();
+    // Занимаем ячейку сразу: между проверкой в начале функции и этой
+    // строкой второй вызов start() видел None и поднимал второй прокси на
+    // том же порту, а один из PID терялся.
+    {
+        let mut guard = state.tgws_pid.lock().unwrap();
+        if let Some(existing) = *guard {
+            if pid_alive(existing) {
+                kill_tree(pid);
+                return Ok(());
+            }
+        }
+        *guard = Some(pid);
+    }
 
     if let Some(out) = child.stdout.take() {
         pipe_log(app.clone(), out);
@@ -262,7 +275,6 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
         pipe_log_err(app.clone(), errs);
     }
 
-    *state.tgws_pid.lock().unwrap() = Some(pid);
     std::thread::spawn({
         let app = app.clone();
         move || {

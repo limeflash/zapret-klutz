@@ -16,7 +16,7 @@ const RAW_BASE: &str =
 /// для проб связи, тащить ради этого целый HTTP-клиент с TLS незачем.
 pub fn http_get(url: &str) -> Result<String, String> {
     #[allow(unused_mut)]
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new(sys::system_exe("curl.exe"));
     cmd.args(["-fsSL", "-m", "20", url]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(sys::CREATE_NO_WINDOW);
@@ -90,11 +90,11 @@ pub fn update_hosts() -> HostsUpdate {
     if needs_update {
         let tmp = std::env::temp_dir().join("zapret_hosts.txt");
         if fs::write(&tmp, &text).is_ok() {
-            let _ = Command::new("notepad.exe").arg(&tmp).spawn();
+            let _ = Command::new(sys::system_exe("notepad.exe")).arg(&tmp).spawn();
             // Именно одним аргументом: explorer разбирает командную строку
             // сам и на «/select,» с пробелом перед путём открывает папку по
             // умолчанию вместо того, чтобы подсветить файл.
-            let _ = Command::new("explorer.exe").arg(format!("/select,{hosts_path}")).spawn();
+            let _ = Command::new(sys::system_exe("explorer.exe")).arg(format!("/select,{hosts_path}")).spawn();
         }
     }
     HostsUpdate { ok: true, error: None, needs_update }
@@ -176,7 +176,12 @@ pub fn clear_discord_cache() -> CacheClear {
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
-    let base = std::env::var("APPDATA").unwrap_or_default();
+    // Без APPDATA путь получался относительным, и remove_dir_all ушёл бы
+    // чистить каталог «discord» рядом с текущим рабочим каталогом.
+    let base = match std::env::var("APPDATA") {
+        Ok(b) if !b.trim().is_empty() => b,
+        _ => return CacheClear { ok: false, cleared: Vec::new() },
+    };
     let mut cleared = Vec::new();
     for channel in ["discord", "discordptb", "discordcanary"] {
         for dir in ["Cache", "Code Cache", "GPUCache"] {

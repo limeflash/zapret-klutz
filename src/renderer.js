@@ -521,7 +521,15 @@ async function stopActive() {
     await window.zapret.removeService();
     loadServiceStatus();
   } else {
-    await window.zapret.stopConfig();
+    // Команда теперь честно отвечает, получилось ли: раньше она всегда
+    // возвращала успех, и окно рапортовало «Обход остановлен» поверх
+    // работающего обхода.
+    const res = await window.zapret.stopConfig();
+    if (res && !res.ok) {
+      showToast(res.error || 'Не удалось остановить обход', 'error');
+      refreshState();
+      return;
+    }
   }
   showToast('Обход остановлен', 'success');
   refreshState();

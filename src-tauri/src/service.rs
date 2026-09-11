@@ -99,7 +99,7 @@ pub fn install_service(root: &Path, file_name: &str) -> Result<(), String> {
         .map_err(|e| format!("Автоустановка недоступна для этой версии service.bat: {e}"))?;
 
     #[allow(unused_mut)]
-    let mut cmd = Command::new("cmd.exe");
+    let mut cmd = Command::new(sys::system_exe("cmd.exe"));
     cmd.args(["/c", "service.bat", "install_auto", file_name])
         .current_dir(root);
     #[cfg(target_os = "windows")]
@@ -127,6 +127,14 @@ pub fn install_service(root: &Path, file_name: &str) -> Result<(), String> {
 /// поднимет драйвер сам.
 pub fn remove_service() {
     sys::run("net", &["stop", "zapret"]);
+    // sc delete на службе в STOP_PENDING оставляет её помеченной к удалению
+    // до перезагрузки, и следующая установка спотыкается об неё.
+    for _ in 0..40 {
+        match sys::svc_query("zapret").state.as_deref() {
+            Some("STOPPED") | None => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(250)),
+        }
+    }
     sys::run("sc", &["delete", "zapret"]);
     crate::winws::stop_winws();
     for name in ["WinDivert", "WinDivert14"] {

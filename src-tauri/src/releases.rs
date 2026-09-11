@@ -15,7 +15,7 @@ const REPO: &str = "Flowseal/zapret-discord-youtube";
 
 fn curl_text(url: &str) -> Result<String, String> {
     #[allow(unused_mut)]
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new(sys::system_exe("curl.exe"));
     cmd.args(["-fsSL", "-m", "20", "-H", "User-Agent: klutz", url]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(sys::CREATE_NO_WINDOW);
@@ -94,11 +94,20 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
     let dest = releases_dir(app).join(&info.name);
 
     #[allow(unused_mut)]
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new(sys::system_exe("curl.exe"));
     cmd.args([
         "-L",
         "--fail",
         "--progress-bar",
+        // Иначе зависшее после установки соединение держит нас вечно:
+        // общего таймаута на закачку ставить нельзя (файл большой), а вот
+        // «меньше килобайта в секунду полминуты» — верный признак смерти.
+        "--connect-timeout",
+        "20",
+        "--speed-limit",
+        "1024",
+        "--speed-time",
+        "30",
         "-H",
         "User-Agent: klutz",
         "-o",
@@ -231,12 +240,9 @@ pub fn list_releases(app: &AppHandle, current_root: Option<&str>) -> Vec<Release
 pub fn delete_release(app: &AppHandle, folder: &str) -> Result<(), String> {
     // Двоеточие тоже: `Path::join("C:Users")` в Windows отбрасывает базовый
     // путь, и remove_dir_all ушёл бы гулять за пределы каталога релизов.
-    if folder.is_empty()
-        || folder.contains("..")
-        || folder.contains('/')
-        || folder.contains('\\')
-        || folder.contains(':')
-    {
+    // «.» тоже: оно проходило все прежние проверки, а join(".") оставляет
+    // путь на самом каталоге релизов — remove_dir_all снёс бы их все разом.
+    if !crate::commands::safe_name(folder) {
         return Err("Недопустимое имя папки.".into());
     }
     let p = releases_dir(app).join(folder);

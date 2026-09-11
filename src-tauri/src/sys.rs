@@ -8,6 +8,28 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Абсолютный путь к системной утилите.
+///
+/// `Command::new("cmd.exe")` ищет файл в том числе в ТЕКУЩЕМ каталоге, а
+/// часть команд мы запускаем с `current_dir` в папке релиза — то есть в
+/// каталоге, который пользователь мог распаковать из чужого архива.
+/// Подложенный туда `cmd.exe` исполнился бы с правами администратора.
+pub fn system_exe(name: &str) -> std::path::PathBuf {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let root = std::path::Path::new(&root);
+    // powershell лежит не в корне System32, explorer — не в System32 вовсе.
+    for candidate in [
+        root.join("System32").join(name),
+        root.join("System32").join("WindowsPowerShell").join("v1.0").join(name),
+        root.join(name),
+    ] {
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from(name)
+}
+
 /// Декодирует вывод консольной утилиты. Сначала UTF-8, а если не вышло —
 /// кодовая страница OEM: на русской Windows sc, net и netsh пишут в CP866, и
 /// `from_utf8_lossy` превращал их сообщения в ромбики — включая текст ошибки,
@@ -68,7 +90,7 @@ pub fn for_each_line<R: std::io::Read>(r: R, mut f: impl FnMut(String)) {
 /// из этих утилит возвращают ненулевой код на «ничего не найдено».
 pub fn run(program: &str, args: &[&str]) -> String {
     #[allow(unused_mut)]
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(system_exe(program));
     cmd.args(args);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -84,7 +106,7 @@ pub fn run(program: &str, args: &[&str]) -> String {
 
 pub fn run_ok(program: &str, args: &[&str]) -> bool {
     #[allow(unused_mut)]
-    let mut cmd = Command::new(program);
+    let mut cmd = Command::new(system_exe(program));
     cmd.args(args);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);

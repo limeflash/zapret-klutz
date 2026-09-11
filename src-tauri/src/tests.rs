@@ -30,10 +30,12 @@ impl ResultRow {
     /// Доля целей, которые реально ответили. В DPI-режиме «заблокировано»
     /// считается неудачей наравне с ошибкой.
     pub fn score(&self, dpi: bool) -> f64 {
+        // saturating: числа приходят из чужого файла результатов, и сумма
+        // трёх u32 у самой границы в release-сборке тихо переполнилась бы.
         let total = if dpi {
-            self.ok + self.err + self.unsup + self.blocked
+            self.ok.saturating_add(self.err).saturating_add(self.unsup).saturating_add(self.blocked)
         } else {
-            self.ok + self.err + self.unsup
+            self.ok.saturating_add(self.err).saturating_add(self.unsup)
         };
         if total == 0 {
             0.0
@@ -116,16 +118,25 @@ fn snapshot_results(root: &Path) -> HashSet<String> {
 
 fn newest_new_result(root: &Path, before: &HashSet<String>) -> Option<PathBuf> {
     let dir = results_dir(root);
-    let mut fresh: Vec<String> = fs::read_dir(&dir)
+    // По времени изменения, а не по алфавиту: имена файлов результатов
+    // задаёт чужой скрипт, и их порядок не обязан совпадать с временем.
+    // Фильтр по расширению — чтобы «результатом» не стал случайный файл
+    // или подкаталог, созданный скриптом позже.
+    fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().into_string().ok())
-        // Без фильтра по расширению «самым свежим результатом» мог стать
-        // любой новый файл или подкаталог, созданный скриптом.
-        .filter(|n| is_result_file(n) && !before.contains(n))
-        .collect();
-    fresh.sort();
-    fresh.pop().map(|n| dir.join(n))
+        .filter(|e| {
+            e.file_name()
+                .into_string()
+                .map(|n| is_result_file(&n) && !before.contains(&n))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| {
+            let t = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((t, e.path()))
+        })
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
 }
 
 /// Один прогон `test zapret.ps1`.
@@ -148,7 +159,7 @@ pub fn run_test_script(
     let before = snapshot_results(root);
 
     #[allow(unused_mut)]
-    let mut cmd = Command::new("powershell.exe");
+    let mut cmd = Command::new(crate::sys::system_exe("powershell.exe"));
     cmd.args([
         "-NoProfile",
         "-ExecutionPolicy",

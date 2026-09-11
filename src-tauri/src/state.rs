@@ -166,11 +166,22 @@ pub fn load_state(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Пишем через временный файл с переименованием: прямой `fs::write` при
+/// аварии посреди записи оставлял обрезанный JSON, и настройки терялись
+/// целиком. Ошибку больше не проглатываем молча — она видна в логе.
 pub fn save_state(app: &AppHandle, state: &AppState) {
-    let dir = app.path().app_data_dir().expect("no app data dir");
-    let _ = fs::create_dir_all(&dir);
-    let snapshot = state.persisted.lock().unwrap().clone();
-    if let Ok(json) = serde_json::to_string_pretty(&snapshot) {
-        let _ = fs::write(state_path(app), json);
+    if let Err(e) = try_save_state(app, state) {
+        eprintln!("klutz: не удалось сохранить state.json: {e}");
     }
+}
+
+fn try_save_state(app: &AppHandle, state: &AppState) -> std::io::Result<()> {
+    let dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
+    fs::create_dir_all(&dir)?;
+    let snapshot = state.persisted.lock().unwrap().clone();
+    let json = serde_json::to_string_pretty(&snapshot).map_err(std::io::Error::other)?;
+    let target = state_path(app);
+    let tmp = target.with_extension("json.tmp");
+    fs::write(&tmp, json)?;
+    fs::rename(&tmp, &target)
 }

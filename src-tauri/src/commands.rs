@@ -186,6 +186,20 @@ pub fn run_config(app: AppHandle, state: State<AppState>, file_name: String) -> 
         }
     };
 
+    // Те же 1.5 секунды на подъём, что и в applyDirect(), — и только потом
+    // записываем состояние. Раньше активная стратегия проставлялась до
+    // проверки: команда возвращала ошибку, а окно и трей продолжали
+    // показывать конфиг, который не запустился.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let running = winws::is_winws_running();
+    if !running {
+        return RunConfigResult {
+            ok: false,
+            error: Some("winws.exe не запустился, проверь конфиг вручную.".into()),
+            live_logs: false,
+        };
+    }
+
     {
         let mut p = state.persisted.lock().unwrap();
         p.active_config = Some(file_name);
@@ -194,19 +208,11 @@ pub fn run_config(app: AppHandle, state: State<AppState>, file_name: String) -> 
     }
     save_state(&app, &state);
 
-    // Same 1.5s settle-then-verify as applyDirect() before reporting success.
-    std::thread::sleep(std::time::Duration::from_millis(1500));
-    let running = winws::is_winws_running();
-
-    RunConfigResult {
-        ok: running,
-        error: if running { None } else { Some("winws.exe не запустился, проверь конфиг вручную.".into()) },
-        live_logs: live_logs && running,
-    }
+    RunConfigResult { ok: true, error: None, live_logs }
 }
 
 #[tauri::command(async)]
-pub fn stop_config(app: AppHandle, state: State<AppState>) -> Result<(), ()> {
+pub fn stop_config(app: AppHandle, state: State<AppState>) -> SimpleResult {
     winws::kill_winws(&app);
     {
         let mut p = state.persisted.lock().unwrap();
@@ -217,7 +223,13 @@ pub fn stop_config(app: AppHandle, state: State<AppState>) -> Result<(), ()> {
         p.installed_as_service = false;
     }
     save_state(&app, &state);
-    Ok(())
+    // Раньше команда всегда отвечала Ok: если taskkill не справился, окно
+    // рапортовало «Обход остановлен» поверх работающего обхода.
+    if winws::is_winws_running() {
+        err("winws.exe не удалось остановить — возможно, его держит служба.")
+    } else {
+        ok()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -511,8 +523,11 @@ fn checked_config(root: &Path, file_name: &str) -> Result<(), String> {
 /// Имя файла или папки, которое пришло из интерфейса и будет приклеено к
 /// нашему каталогу. Кроме «..» и разделителей отсекаем префикс диска:
 /// в Windows `Path::join("C:foo")` выбрасывает базовый путь целиком.
-fn safe_name(name: &str) -> bool {
+pub fn safe_name(name: &str) -> bool {
     !name.is_empty()
+        // «.» и «..» — не имена: join(".") оставляет путь на самом каталоге,
+        // и remove_dir_all снёс бы всё его содержимое.
+        && name != "."
         && !name.contains("..")
         && !name.contains('/')
         && !name.contains('\\')
@@ -1299,8 +1314,13 @@ pub fn import_settings(app: AppHandle, state: State<AppState>, path: String) -> 
     let mut imported_tgws_bad = false;
     {
         let mut p = state.persisted.lock().unwrap();
+        // Только если разобралось: раньше повреждённый список молча
+        // превращался в None, то есть сбрасывал цели на стандартные, а
+        // импорт при этом считался успешным.
         if let Some(t) = v.get("gameTargets") {
-            p.game_targets = serde_json::from_value(t.clone()).ok();
+            if let Ok(g) = serde_json::from_value(t.clone()) {
+                p.game_targets = Some(g);
+            }
         }
         if let Some(a) = v.get("autoSwitch") {
             if let Ok(a) = serde_json::from_value(a.clone()) {
@@ -1405,7 +1425,13 @@ pub fn delete_release(app: AppHandle, folder_name: String) -> SimpleResult {
 #[tauri::command(async)]
 pub fn load_archive(app: AppHandle, state: State<AppState>, zip_path: String) -> LoadPathResult {
     let zip = PathBuf::from(&zip_path);
-    let name = zip.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "release".into());
+    // Архив с именем вида «...zip» даёт file_stem() == "..", и цель
+    // распаковки уезжала бы из каталога релизов.
+    let name = zip
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|n| safe_name(n))
+        .unwrap_or_else(|| "release".into());
     let target = crate::releases::releases_dir(&app).join(&name);
     let root = match crate::releases::extract_zip(&zip, &target) {
         Ok(r) => r,

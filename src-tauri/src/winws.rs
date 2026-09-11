@@ -98,7 +98,7 @@ pub fn extract_winws_args(root: &Path, file_name: &str) -> Option<Vec<String>> {
 /// missing process is not an error here, same as the JS version ignoring it.
 pub fn stop_winws() {
     #[allow(unused_mut)]
-    let mut cmd = Command::new("taskkill");
+    let mut cmd = Command::new(crate::sys::system_exe("taskkill.exe"));
     cmd.args(["/IM", "winws.exe", "/F"]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -107,7 +107,7 @@ pub fn stop_winws() {
 
 pub fn is_winws_running() -> bool {
     #[allow(unused_mut)]
-    let mut cmd = Command::new("tasklist");
+    let mut cmd = Command::new(crate::sys::system_exe("tasklist.exe"));
     cmd.args(["/FI", "IMAGENAME eq winws.exe"]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -203,7 +203,7 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
         // Fallback: run the .bat itself via cmd — no live logs, but works
         // for any release shape, same tradeoff as the Electron fallback.
         #[allow(unused_mut)]
-        let mut cmd = Command::new("cmd.exe");
+        let mut cmd = Command::new(crate::sys::system_exe("cmd.exe"));
         cmd.args(["/c", file_name])
             .current_dir(root)
             .stdin(Stdio::null())
@@ -271,7 +271,13 @@ fn watch_child(app: &AppHandle, pid: u32) {
                     break;
                 }
                 Ok(None) => continue,
-                Err(_) => break,
+                // Состояние процесса прочитать не вышло — держать в ячейке
+                // handle, про который мы больше ничего не знаем, хуже, чем
+                // честно её освободить.
+                Err(_) => {
+                    *guard = None;
+                    break;
+                }
             }
         }
     });

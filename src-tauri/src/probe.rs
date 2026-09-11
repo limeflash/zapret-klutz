@@ -25,7 +25,7 @@ pub struct ProbeResult {
 pub fn http_probe(url: &str, timeout_sec: u64) -> ProbeResult {
     let started = Instant::now();
     #[allow(unused_mut)]
-    let mut cmd = Command::new("curl.exe");
+    let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
     cmd.args([
         "-s",
         "-o",

@@ -142,9 +142,13 @@ fn attempt_switch(app: &AppHandle) {
     }
     let current = state.persisted.lock().unwrap().active_config.clone();
     let tried = state.healing_attempts.lock().unwrap().clone();
+    // Имена приходят из файла результатов, который пишет чужой скрипт.
+    // Без проверки строка вида «..\\other.bat» увела бы apply_config за
+    // пределы папки релиза.
+    let configs = crate::release::list_configs(&root);
     let next = ranked
         .into_iter()
-        .find(|c| Some(c) != current.as_ref() && !tried.contains(c) && root.join(c).exists());
+        .find(|c| Some(c) != current.as_ref() && !tried.contains(c) && configs.contains(c));
 
     let Some(next) = next else {
         // Перепробовали всё — молотить дальше бессмысленно, но и выключать
@@ -219,7 +223,9 @@ pub fn apply_config(app: &AppHandle, name: &str) -> Result<(), String> {
         (p.root_path.clone(), p.installed_as_service)
     };
     let root = std::path::PathBuf::from(root.ok_or("Сначала загрузи релиз zapret.")?);
-    if !root.join(name).exists() {
+    // Ровно один из показанных конфигов, а не любой существующий путь:
+    // дальше имя уезжает в cmd /c, который разбирает строку заново.
+    if !crate::release::list_configs(&root).iter().any(|c| c == name) {
         return Err(format!("Нет файла {name} в папке релиза."));
     }
     if as_service {
