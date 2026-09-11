@@ -89,3 +89,24 @@ pub fn validate_release(root: &Path) -> ReleaseCheck {
         can_install_service: crate::service::can_install_service(root),
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn натуральная_сортировка_ставит_alt2_перед_alt10() {
+        let mut v = vec![
+            "general (ALT10).bat".to_string(),
+            "general (ALT2).bat".to_string(),
+            "general.bat".to_string(),
+        ];
+        v.sort_by_key(|a| natural_sort_key(a));
+        assert_eq!(v, vec!["general (ALT2).bat", "general (ALT10).bat", "general.bat"]);
+    }
+
+    #[test]
+    fn ключ_не_зависит_от_регистра() {
+        assert_eq!(natural_sort_key("General (ALT).BAT"), natural_sort_key("general (alt).bat"));
+    }
+}

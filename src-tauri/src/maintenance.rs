@@ -250,3 +250,20 @@ pub fn save_custom_lists(root: &Path, include: &str, exclude: &str) -> Result<()
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn версия_берётся_из_local_version() {
+        let dir = std::env::temp_dir().join(format!("klutz-ver-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join("service.bat"), "@echo off\r\nset \"LOCAL_VERSION=1.9.9c\"\r\n").unwrap();
+        assert_eq!(local_version(&dir).as_deref(), Some("1.9.9c"));
+
+        fs::write(dir.join("service.bat"), "@echo off\r\n").unwrap();
+        assert_eq!(local_version(&dir), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

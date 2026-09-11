@@ -10,16 +10,21 @@ http
   .createServer((req, res) => {
     const rel = decodeURIComponent(req.url.split('?')[0]);
 
-    // /mock/... serves the real index.html with a window.zapret stub spliced
-    // in right before renderer.js, so the app renders with fake-but-realistic
-    // data instead of throwing on the missing Electron preload bridge.
+    // /src/mock отдаёт настоящий index.html, где вместо моста tauri-bridge.js
+    // подставлен стаб window.zapret: приложение рисуется на правдоподобных
+    // данных, без Tauri.
     if (rel === '/src/mock' || rel === '/src/mock/') {
       const html = fs.readFileSync(path.join(ROOT, 'src/index.html'), 'utf8');
       const mockJs = fs.readFileSync(path.join(__dirname, 'mock-zapret.js'), 'utf8');
-      const withMock = html.replace(
-        '<script src="renderer.js"></script>',
-        `<script>${mockJs}</script>\n<script src="renderer.js"></script>`
-      );
+      // Мост именно ЗАМЕНЯЕМ, а не добавляем стаб следом: без window.__TAURI__
+      // он падает на первой же строке, и консоль стенда была забита его
+      // ошибками — на их фоне настоящие проблемы renderer.js не разглядеть.
+      const withMock = html.includes('<script src="tauri-bridge.js"></script>')
+        ? html.replace('<script src="tauri-bridge.js"></script>', `<script>${mockJs}</script>`)
+        : html.replace(
+            '<script src="renderer.js"></script>',
+            `<script>${mockJs}</script>\n<script src="renderer.js"></script>`
+          );
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(withMock);
       return;
@@ -39,4 +44,4 @@ http
       res.end(buf);
     });
   })
-  .listen(4174, () => console.log('preview on http://localhost:4174'));
+  .listen(4174, () => console.log('preview on http://localhost:4174/src/mock'));

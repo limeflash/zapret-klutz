@@ -146,3 +146,72 @@ pub fn remove_service() {
 pub fn service_conflict() -> bool {
     sys::svc_query("zapret").exists
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    /// Минимальный service.bat со всеми тремя якорями (вариант с LF).
+    ///
+    /// Строки собираем списком: обратный слеш в конце строкового литерала
+    /// Rust съедает не только перевод строки, но и отступ следующей, а
+    /// якоря завязаны ровно на четыре пробела перед echo/pause/goto.
+    fn синтетический_bat() -> String {
+        let lines = [
+            "@echo off",
+            ADMIN_ANCHOR,
+            "    echo admin",
+            ")",
+            ":menu",
+            "set \"selectedFile=!file%choice%!\"",
+            "if not defined selectedFile (",
+            "    echo Invalid choice, exiting...",
+            "    pause",
+            "    goto menu",
+            ")",
+            "",
+            ":: Args that should be followed by value",
+            "sc start %SRVCNAME%",
+            "for %%F in (\"!file%choice%!\") do (",
+            "    set \"filename=%%~nF\"",
+            ")",
+            "reg add \"HKLM\\System\\CurrentControlSet\\Services\\zapret\" /v zapret-discord-youtube /t REG_SZ /d \"!filename!\" /f",
+            "",
+            "pause",
+            "goto menu",
+        ];
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
+
+    #[test]
+    fn патч_собирается_и_идемпотентен() {
+        let src = синтетический_bat();
+        let patched = build_patched(&src).expect("якоря должны найтись").expect("первый проход патчит");
+        assert!(patched.contains("install_auto"));
+        assert!(patched.contains(":install_selected_file"));
+        // Второй проход по уже пропатченному тексту не делает ничего.
+        assert!(build_patched(&patched).unwrap().is_none());
+    }
+
+    #[test]
+    fn без_якорей_ошибка_а_не_испорченный_файл() {
+        assert!(build_patched("@echo off\r\nexit /b").is_err());
+    }
+
+    #[test]
+    fn проверка_возможности_не_трогает_файл_на_диске() {
+        let dir = std::env::temp_dir().join(format!("klutz-svc-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("service.bat");
+        fs::write(&path, синтетический_bat()).unwrap();
+        let до = fs::read_to_string(&path).unwrap();
+
+        assert!(can_install_service(&dir), "якоря есть — установка возможна");
+
+        let после = fs::read_to_string(&path).unwrap();
+        assert_eq!(до, после, "проверка обязана быть только чтением");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

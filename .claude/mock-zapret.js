@@ -1,5 +1,10 @@
-// Стаб window.zapret для визуальной проверки вёрстки без реального Electron.
+// Стаб window.zapret для проверки интерфейса без Tauri.
 // НЕ используется в продакшене — подключается только preview-server.js по /mock.
+//
+// ВАЖНО: формы ответов должны совпадать с тем, что реально отдают команды
+// Rust (src-tauri/src/commands.rs и структуры с serde rename). Стенд, который
+// врёт про контракт, хуже, чем его отсутствие: именно так здесь незаметно
+// разъехались getToggles, checkUpdates и getNotifySound.
 (function () {
   const CONFIGS = [
     'general.bat', 'general (ALT).bat', 'general (ALT2).bat', 'general (ALT3).bat',
@@ -51,7 +56,10 @@
   const noop = async () => ({ ok: true });
 
   window.zapret = {
-    getPathForFile: (f) => f.name,
+    // Перетаскивание идёт событием Tauri, а не через DOM. Метод обязан
+    // существовать: renderer подписывается на него при загрузке, и без
+    // заглушки весь скрипт падал бы на TypeError.
+    onFileDrop: () => () => {},
     getVersions: async () => ({ app: '1.1.0', zapret: '1.9.9c', tgws: '1.10.2' }),
     checkKlutzUpdate: async () => ({ current: '1.1.0', latest: '1.2.0', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' }),
     checkComponentUpdates: async () => ({
@@ -66,10 +74,24 @@
     loadPath: noop,
     getState: async () => state,
 
-    listReleases: async () => ({ ok: true, releases: [] }),
+    listReleases: async () => ({
+      ok: true,
+      releases: [
+        { name: 'zapret-discord-youtube-1.9.9c', path: 'C:\\Users\\vbu00\\AppData\\Roaming\\com.vbu00.klutz\\releases\\zapret-discord-youtube-1.9.9c', current: true, extractedAt: Date.now() - 3 * 86400000 },
+        { name: 'zapret-discord-youtube-1.9.8', path: 'C:\\Users\\vbu00\\AppData\\Roaming\\com.vbu00.klutz\\releases\\zapret-discord-youtube-1.9.8', current: false, extractedAt: Date.now() - 40 * 86400000 },
+      ],
+    }),
     deleteRelease: noop,
 
-    getLatestReleaseInfo: async () => ({ ok: true, version: '1.9.9c', notes: 'Тестовые данные — без реального релиза.' }),
+    getLatestReleaseInfo: async () => ({
+      ok: true,
+      error: null,
+      version: '1.9.9c',
+      name: 'zapret-discord-youtube-1.9.9c.zip',
+      size: 12_400_000,
+      url: 'https://example.invalid/zapret.zip',
+      notesUrl: 'https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.9c',
+    }),
     downloadLatestRelease: noop,
     onDownloadProgress: () => () => {},
 
@@ -100,14 +122,21 @@
     }),
     onTestLog: () => () => {},
 
-    getToggles: async () => ({ gameFilter: 'tcp+udp', ipsetMode: 'auto', autoUpdate: false }),
+    getToggles: async () => ({ gameMode: 'off', ipsetMode: 'loaded', autoUpdate: false }),
     setGameFilter: noop,
     cycleIpsetMode: noop,
     setAutoUpdate: noop,
 
     updateIpsetList: noop,
     updateHostsFile: noop,
-    checkUpdates: async () => ({ ok: true, hasUpdate: false, version: '1.9.9c' }),
+    checkUpdates: async () => ({
+      ok: true,
+      error: null,
+      local: '1.9.9c',
+      remote: '1.9.10',
+      upToDate: false,
+      releaseUrl: 'https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.10',
+    }),
     clearDiscordCache: noop,
     runDiagnostics: async () => ({
       ok: true,
@@ -120,7 +149,7 @@
     }),
     fixDiagnostic: noop,
 
-    getCustomLists: async () => ({ include: '', exclude: '' }),
+    getCustomLists: async () => ({ ok: true, include: '', exclude: '' }),
     saveCustomLists: noop,
 
     checkGames: async () => ({ ok: true, targets: allTargets().map(pingResult), pending: false, checkedAt: Date.now(), running: true, strategy: state.activeConfig }),
@@ -134,45 +163,31 @@
       customTargets = [];
       return { ok: true, targets: allTargets() };
     },
-    runGameStrategyTest: async () => {
-      const rows = CONFIGS.slice(0, 6).map((c, i) => ({
-        config: c,
-        gameFilterMode: i % 2 ? 'tcp+udp' : 'off',
-        successRate: [1, 0.6, 0, 1, 0.4, 1][i],
-        udp: { ok: i % 2 === 0 },
-        avgMs: 30 + i * 12,
-      }));
-      if (window.__gameProgressCb) window.__gameProgressCb(rows);
-      return { ok: true };
-    },
-    stopGameStrategyTest: noop,
-    onGameTestLog: () => () => {},
-    onGameTestProgress: (cb) => {
-      window.__gameProgressCb = cb;
-      return () => {
-        window.__gameProgressCb = null;
-      };
-    },
-
     getAutostart: async () => ({ enabled: true }),
     setAutostart: noop,
 
-    exportSettings: noop,
-    importSettings: noop,
+    exportSettings: async () => ({ ok: false, cancelled: true }),
+    importSettings: async () => ({ ok: true }),
 
     getNotifications: async () => ({ enabled: true, supported: true }),
     setNotifications: noop,
     testNotification: noop,
 
-    getNotifySound: async () => ({ volume: 70, duration: 5 }),
+    getNotifySound: async () => ({ volume: 70, duration: 'short' }),
     setNotifySound: noop,
     onPlayNotifySound: () => () => {},
 
     getAutoSwitch: async () => ({ enabled: true, threshold: 3, intervalSec: 30, hasRanking: true }),
     setAutoSwitch: async () => ({ ok: true }),
-    getHealLog: async () => ({ ok: true, entries: [] }),
+    getHealLog: async () => ({
+      ok: true,
+      entries: [
+        { at: Date.now() - 40 * 60000, type: 'switch', from: 'general.bat', to: 'general (ALT).bat', ok: true },
+        { at: Date.now() - 90 * 60000, type: 'switch', from: 'general (MGTS).bat', to: 'general.bat', ok: false },
+      ],
+    }),
 
-    getAutoTestSchedule: async () => ({ enabled: false, days: 7 }),
+    getAutoTestSchedule: async () => ({ enabled: false, days: 14, mode: 'dpi', lastRunAt: null }),
     setAutoTestSchedule: noop,
     onAutoSwitched: () => () => {},
 

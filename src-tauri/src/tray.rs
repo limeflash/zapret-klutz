@@ -438,3 +438,24 @@ pub fn refresh(app: &AppHandle) {
         }
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn подписи_конфигов_как_в_окне() {
+        assert_eq!(pretty("general.bat"), "Базовый");
+        assert_eq!(pretty("general (FAKE TLS AUTO).bat"), "FAKE TLS AUTO");
+        assert_eq!(pretty("general (ALT11).bat"), "ALT11");
+        assert_eq!(pretty("другое.bat"), "другое");
+    }
+
+    #[test]
+    fn имя_с_кириллицей_не_роняет_срез() {
+        // Срез base[7..] байтовый — проверяем, что на не-ASCII не паникуем.
+        for name in ["генерал.bat", "general (ФЕЙК).bat", "ge.bat", "g.bat", ".bat"] {
+            let _ = pretty(name);
+        }
+    }
+}

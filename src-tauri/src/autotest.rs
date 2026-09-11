@@ -99,7 +99,7 @@ fn maybe_run(app: &AppHandle) {
     if crate::service::service_conflict() {
         return;
     }
-    if LAST_ABORTED.lock().unwrap().map_or(false, |t| t.elapsed() < RETRY_AFTER_ABORT) {
+    if LAST_ABORTED.lock().unwrap().is_some_and(|t| t.elapsed() < RETRY_AFTER_ABORT) {
         return;
     }
 

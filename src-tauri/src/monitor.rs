@@ -274,3 +274,62 @@ pub fn latest_ranking(root: &std::path::Path) -> Vec<String> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use crate::targets::TargetResult;
+
+    fn t(name: &str, ok: bool) -> TargetResult {
+        TargetResult { name: name.into(), host: "h".into(), port: 443, ok, ms: 1, reason: None, probe: "http" }
+    }
+
+    /// Стандартные ключевые цели: четыре Discord и три YouTube.
+    fn целиком(discord_ok: bool, youtube_ok: bool) -> Vec<TargetResult> {
+        let mut v: Vec<_> = (1..=4).map(|i| t(&format!("Discord {i}"), discord_ok)).collect();
+        v.extend((1..=3).map(|i| t(&format!("YouTube {i}"), youtube_ok)));
+        v
+    }
+
+    #[test]
+    fn просадка_симметрична_по_сервисам() {
+        assert!(is_degraded(&целиком(false, true)), "Discord лёг целиком — это просадка");
+        // Ровно этот случай старое условие ok*2 < total не ловило никогда:
+        // 4 живых из 7, 8 < 7 ложно.
+        assert!(is_degraded(&целиком(true, false)), "YouTube лёг целиком — тоже просадка");
+        assert!(!is_degraded(&целиком(true, true)), "всё отвечает — не просадка");
+        assert!(is_degraded(&целиком(false, false)));
+    }
+
+    #[test]
+    fn старое_условие_действительно_пропускало_youtube() {
+        let r = целиком(true, false);
+        let ok = r.iter().filter(|x| x.ok).count();
+        assert_eq!(ok, 4);
+        assert!(!(ok * 2 < r.len()), "старое условие тут молчало");
+    }
+
+    #[test]
+    fn одна_упавшая_цель_из_сервиса_не_считается_просадкой() {
+        let mut r = целиком(true, true);
+        r[0].ok = false;
+        assert!(!is_degraded(&r), "одна икота из четырёх — не повод переключаться");
+    }
+
+    #[test]
+    fn сервис_определяется_без_учёта_регистра() {
+        assert_eq!(service_of("Discord Main"), Some("discord"));
+        assert_eq!(service_of("YOUTUBE Web"), Some("youtube"));
+        assert_eq!(service_of("Steam"), None);
+    }
+
+    #[test]
+    fn переименованные_цели_попадают_в_одну_группу() {
+        // Пользователь переименовал всё — раньше tick() уходил в ранний
+        // return и мониторинг умирал молча.
+        let r = vec![t("Дискорд", false), t("Ютуб", false)];
+        assert!(is_degraded(&r));
+        let r = vec![t("Дискорд", true), t("Ютуб", true)];
+        assert!(!is_degraded(&r));
+    }
+}

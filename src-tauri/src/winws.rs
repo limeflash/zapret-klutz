@@ -330,3 +330,70 @@ pub fn kill_winws(app: &AppHandle) {
     }
     stop_winws();
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    fn временный_релиз(bat: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("klutz-winws-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        fs::create_dir_all(dir.join("lists")).unwrap();
+        fs::write(dir.join("general.bat"), bat).unwrap();
+        dir
+    }
+
+    #[test]
+    fn разбирает_аргументы_и_подставляет_переменные() {
+        let bat = "@echo off\r\nset BIN=%~dp0bin\\\r\nstart \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,443 ^\r\n --hostlist=\"%LISTS%list-general.txt\" ^\r\n --filter-udp=%GameFilterUDP%\r\n";
+        let dir = временный_релиз(bat);
+        let args = extract_winws_args(&dir, "general.bat").expect("должно разобраться");
+
+        assert!(args.iter().any(|a| a == "--wf-tcp=80,443"), "{args:?}");
+        assert!(args.iter().any(|a| a.starts_with("--hostlist=") && a.contains("list-general.txt")), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("%LISTS%")), "переменные должны быть подставлены: {args:?}");
+        assert!(!args.iter().any(|a| a.contains("%GameFilter")), "{args:?}");
+        assert!(!args.iter().any(|a| a == "^"), "склейка строк не должна оставлять ^: {args:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn без_winws_в_строке_возвращает_none() {
+        let dir = временный_релиз("@echo off\r\necho ничего интересного\r\n");
+        assert!(extract_winws_args(&dir, "general.bat").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn без_ключей_возвращает_none() {
+        let dir = временный_релиз("start \"z\" \"%BIN%winws.exe\" простотекст\r\n");
+        assert!(extract_winws_args(&dir, "general.bat").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn несуществующий_файл_не_паникует() {
+        let dir = временный_релиз("@echo off");
+        assert!(extract_winws_args(&dir, "нет-такого.bat").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn game_filter_читается_из_маркера() {
+        let dir = временный_релиз("@echo off");
+        fs::create_dir_all(dir.join("utils")).unwrap();
+
+        // Маркера нет — фильтр выключен, порт 12.
+        assert_eq!(game_filter_values(&dir).game_filter, "12");
+
+        fs::write(dir.join("utils").join("game_filter.enabled"), "tcp").unwrap();
+        let gf = game_filter_values(&dir);
+        assert_eq!((gf.game_filter_tcp, gf.game_filter_udp), ("1024-65535", "12"));
+
+        fs::write(dir.join("utils").join("game_filter.enabled"), "udp").unwrap();
+        let gf = game_filter_values(&dir);
+        assert_eq!((gf.game_filter_tcp, gf.game_filter_udp), ("12", "1024-65535"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

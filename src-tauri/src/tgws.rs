@@ -363,3 +363,52 @@ pub fn adopt_existing(app: &AppHandle) {
 pub fn pid_alive(pid: u32) -> bool {
     image_name(pid).is_some()
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn секрет_ровно_32_hex() {
+        let s = random_secret();
+        assert_eq!(s.len(), 32, "{s}");
+        assert!(is_valid_secret(&s));
+    }
+
+    #[test]
+    fn секреты_не_повторяются() {
+        let мн: std::collections::HashSet<_> = (0..64).map(|_| random_secret()).collect();
+        assert_eq!(мн.len(), 64, "системный ГСЧ обязан давать разные значения");
+    }
+
+    #[test]
+    fn половинки_секрета_независимы() {
+        // Старая реализация брала два блока SipHash со связанными ключами.
+        // Грубая проверка: обе половины должны меняться от вызова к вызову.
+        let первые: std::collections::HashSet<_> = (0..32).map(|_| random_secret()[..16].to_string()).collect();
+        let вторые: std::collections::HashSet<_> = (0..32).map(|_| random_secret()[16..].to_string()).collect();
+        assert_eq!(первые.len(), 32);
+        assert_eq!(вторые.len(), 32);
+    }
+
+    #[test]
+    fn проверка_формата_секрета() {
+        assert!(!is_valid_secret(""));
+        assert!(!is_valid_secret("zz34567890123456789012345678901f"));
+        assert!(!is_valid_secret("abc"));
+        assert!(is_valid_secret("0123456789abcdef0123456789ABCDEF"));
+    }
+
+    #[test]
+    fn в_ссылку_вместо_слушающего_адреса_идёт_локальный() {
+        let mut s = TgSettings::default();
+        s.secret = "0123456789abcdef0123456789abcdef".into();
+        s.port = 1443;
+        for listen in ["0.0.0.0", "::", "", "  "] {
+            s.host = listen.into();
+            assert_eq!(proxy_url(&s), "tg://proxy?server=127.0.0.1&port=1443&secret=dd0123456789abcdef0123456789abcdef");
+        }
+        s.host = "192.168.1.10".into();
+        assert!(proxy_url(&s).contains("server=192.168.1.10"));
+    }
+}

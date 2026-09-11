@@ -251,3 +251,17 @@ pub fn delete_release(app: &AppHandle, folder: &str) -> Result<(), String> {
     }
     fs::remove_dir_all(p).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn процент_из_полосы_curl() {
+        assert_eq!(parse_percent("######                    45.2%"), Some(45));
+        assert_eq!(parse_percent("100.0%"), Some(100));
+        assert_eq!(parse_percent(""), None);
+        assert_eq!(parse_percent("######"), None);
+        assert_eq!(parse_percent("просто текст"), None);
+    }
+}

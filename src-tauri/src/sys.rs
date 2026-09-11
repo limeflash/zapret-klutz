@@ -164,3 +164,53 @@ pub fn installed_service_strategy() -> Option<String> {
         Some(line.to_string())
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn utf8_проходит_как_есть() {
+        assert_eq!(decode_console("служба запущена".as_bytes()), "служба запущена");
+        assert_eq!(decode_console(b""), "");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn однобайтовый_вывод_не_превращается_в_ромбики() {
+        // Кодовая страница OEM у каждой машины своя (866 на русской, 437 на
+        // английской), поэтому проверяем не конкретные буквы, а само
+        // свойство: байты, не являющиеся UTF-8, декодируются в осмысленный
+        // текст без U+FFFD — именно их from_utf8_lossy превращал в ромбики.
+        let байты = [0x8E_u8, 0xE8, 0xA8, 0xA1, 0xAA, 0xA0];
+        #[allow(invalid_from_utf8)]
+        {
+            assert!(std::str::from_utf8(&байты).is_err(), "проверяем именно не-UTF-8");
+        }
+
+        let lossy = String::from_utf8_lossy(&байты);
+        assert!(lossy.contains('\u{FFFD}'), "старое поведение — ромбики");
+
+        let s = decode_console(&байты);
+        assert!(!s.contains('\u{FFFD}'), "новое — без потерь, получили {s:?}");
+        assert_eq!(s.chars().count(), байты.len(), "однобайтовая кодировка: символ на байт");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn системные_утилиты_разрешаются_в_абсолютный_путь() {
+        for exe in ["cmd.exe", "tasklist.exe", "sc.exe", "powershell.exe"] {
+            let p = system_exe(exe);
+            assert!(p.is_absolute(), "{exe}: {p:?}");
+            assert!(p.exists(), "{exe}: {p:?} не существует");
+        }
+    }
+
+    #[test]
+    fn построчное_чтение_не_теряет_кириллицу() {
+        let data = "первая\nвторая\r\nтретья".as_bytes().to_vec();
+        let mut got = Vec::new();
+        for_each_line(std::io::Cursor::new(data), |l| got.push(l));
+        assert_eq!(got, vec!["первая", "вторая", "третья"]);
+    }
+}

@@ -236,3 +236,56 @@ pub fn run_test_script(
         .ok_or("Тесты завершились, но файл результатов не найден.")?;
     fs::read_to_string(file).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    fn row(ok: u32, err: u32, unsup: u32, blocked: u32) -> ResultRow {
+        ResultRow { config: "c".into(), ok, err, unsup, ping_ok: 0, ping_fail: 0, blocked }
+    }
+
+    #[test]
+    fn score_не_переполняется_на_значениях_из_чужого_файла() {
+        let r = row(u32::MAX, u32::MAX, u32::MAX, u32::MAX);
+        let s = r.score(true);
+        assert!(s.is_finite() && (0.0..=1.0).contains(&s), "получили {s}");
+        let s = r.score(false);
+        assert!(s.is_finite() && (0.0..=1.0).contains(&s));
+    }
+
+    #[test]
+    fn score_в_dpi_считает_заблокированные_неудачей() {
+        let r = row(5, 0, 0, 5);
+        assert_eq!(r.score(true), 0.5);
+        assert_eq!(r.score(false), 1.0);
+    }
+
+    #[test]
+    fn score_пустой_строки_ноль_а_не_паника() {
+        assert_eq!(row(0, 0, 0, 0).score(true), 0.0);
+    }
+
+    #[test]
+    fn разбор_обоих_форматов_analytics() {
+        let std_text = "шум\n=== ANALYTICS ===\ngeneral (ALT).bat: HTTP OK: 6, ERR: 1, UNSUP: 0, Ping OK: 5, Fail: 2\n";
+        let (rows, dpi) = parse_results(std_text);
+        assert!(!dpi);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].config, "general (ALT).bat");
+        assert_eq!((rows[0].ok, rows[0].err, rows[0].ping_ok, rows[0].ping_fail), (6, 1, 5, 2));
+
+        let dpi_text = "=== ANALYTICS ===\ngeneral.bat: OK: 3, ERR: 1, UNSUP: 0, BLOCKED: 3\n";
+        let (rows, dpi) = parse_results(dpi_text);
+        assert!(dpi);
+        assert_eq!((rows[0].ok, rows[0].blocked), (3, 3));
+    }
+
+    #[test]
+    fn файлом_результата_считается_только_txt() {
+        assert!(is_result_file("2026-09-12 14-05.txt"));
+        assert!(is_result_file("A.TXT"));
+        assert!(!is_result_file("лог.log"));
+        assert!(!is_result_file("подкаталог"));
+    }
+}

@@ -104,3 +104,16 @@ pub fn set_auto_update(root: &Path, enabled: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn режим_ipset_по_содержимому() {
+        assert_eq!(ipset_mode_from(""), "any");
+        assert_eq!(ipset_mode_from("   \n\n"), "any");
+        assert_eq!(ipset_mode_from("203.0.113.113/32\n"), "none");
+        assert_eq!(ipset_mode_from("1.2.3.0/24\n5.6.7.8\n"), "loaded");
+    }
+}

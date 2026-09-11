@@ -1559,3 +1559,26 @@ pub fn window_close(window: tauri::Window) {
 pub fn window_is_maximized(window: tauri::Window) -> bool {
     window.is_maximized().unwrap_or(false)
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn safe_name_отсекает_всё_что_уводит_из_каталога() {
+        for bad in ["", ".", "..", "..\\x", "a/b", "a\\b", "C:x", "C:", "release/../../x"] {
+            assert!(!safe_name(bad), "должно быть отвергнуто: {bad:?}");
+        }
+        for good in ["release", "zapret-discord-youtube-1.9.9c", "general (ALT).bat", "имя с пробелом"] {
+            assert!(safe_name(good), "должно быть принято: {good:?}");
+        }
+    }
+
+    #[test]
+    fn точка_проходила_старую_проверку_и_сносила_весь_каталог() {
+        // Старое условие: только "..", "/" и "\\".
+        let старое = |n: &str| !n.contains("..") && !n.contains('/') && !n.contains('\\');
+        assert!(старое("."), "старая проверка «.» пропускала");
+        assert!(!safe_name("."), "новая обязана отвергнуть");
+    }
+}
