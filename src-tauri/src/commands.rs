@@ -792,9 +792,18 @@ pub fn stop_tgwsproxy(app: AppHandle) -> SimpleResult {
 }
 
 #[tauri::command(async)]
-pub fn restart_tgwsproxy(app: AppHandle) -> SimpleResult {
+pub fn restart_tgwsproxy(app: AppHandle, state: State<AppState>) -> SimpleResult {
+    let port = state.persisted.lock().unwrap().tgws.as_ref().map(|t| t.port).unwrap_or(0);
     crate::tgws::stop(&app);
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    // taskkill возвращается раньше, чем освобождается сокет. Фиксированные
+    // 400 мс не гарантировали ничего: новый процесс падал на «address in
+    // use» уже после того, как команда отвечала ok, и статус залипал.
+    for _ in 0..40 {
+        if port == 0 || crate::tgws::pid_listening_on(port).is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     match crate::tgws::start(&app) {
         Ok(()) => ok(),
         Err(e) => err(e),

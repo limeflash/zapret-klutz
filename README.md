@@ -3,7 +3,11 @@
 Графическая оболочка для обхода блокировок Discord, YouTube и игровых
 сервисов на Windows. Управляет [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube)
 и встроенным [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) для Telegram.
-Ничего не отправляет и не собирает.
+
+Телеметрии нет: Klutz не собирает о вас ничего и никуда не отправляет. Наружу
+ходит только за обновлениями — к `api.github.com` и `raw.githubusercontent.com`
+за версиями Klutz, zapret и TgWsProxy, за списком ipset и за рекомендованным
+`hosts`. Как и у любого запроса, GitHub при этом видит ваш IP.
 
 ## Что умеет
 
