@@ -13,3 +13,6 @@ __pycache__/
 # Локальные настройки Claude Code
 .claude/settings.local.json
 tools/tgwsproxy-build/pyinstaller.log
+
+# Путь к линкеру MSVC — у каждой машины свой (см. README)
+src-tauri/.cargo/config.toml

@@ -1,5 +1,0 @@
-# Git for Windows ships its own link.exe (a hardlink utility, not a linker)
-# earlier on PATH than the real MSVC linker — rustc was picking that one up
-# and failing. Pin the actual one explicitly instead of trusting PATH order.
-[target.x86_64-pc-windows-msvc]
-linker = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\link.exe"
