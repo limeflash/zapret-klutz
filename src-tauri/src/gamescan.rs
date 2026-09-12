@@ -152,55 +152,118 @@ pub fn process_names() -> std::collections::HashMap<u32, String> {
         .collect()
 }
 
-/// Процессы, которые точно не игра. Список короткий намеренно: это не
-/// чёрный список «всего лишнего», а защита от очевидного — браузер и
-/// системные службы держат внешних соединений больше любой игры и иначе
-/// всегда бы выигрывали.
-const НЕ_ИГРА: &[&str] = &[
-    "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "browser.exe",
-    "svchost.exe", "System", "Idle", "explorer.exe", "SearchApp.exe",
-    "OneDrive.exe", "Telegram.exe", "Discord.exe", "klutz.exe", "winws.exe",
-    "curl.exe", "MsMpEng.exe", "backgroundTaskHost.exe", "RuntimeBroker.exe",
-];
-
-fn похоже_на_игру(name: &str) -> bool {
-    !НЕ_ИГРА.iter().any(|b| b.eq_ignore_ascii_case(name))
+/// Известные НЕ-игровые порты вне веба. Без этого списка любая фоновая
+/// служба выглядит игрой: у неё тоже «не 80 и не 443».
+///
+/// 5228 — Google FCM, на нём сидят уведомления половины программ; именно он
+/// однажды и выдал службу HP за игру. Остальное — почта, DNS, время, SMB.
+fn служебный_порт(port: u16) -> bool {
+    matches!(
+        port,
+        53 | 67 | 68 | 88 | 123 | 135 | 137..=139 | 389 | 445 | 465 | 500
+            | 514 | 587 | 636 | 993 | 995 | 1194 | 1701 | 1723 | 1900
+            | 3389 | 5222 | 5228..=5230 | 5353 | 5938 | 8080 | 8443 | 8883 | 9443
+    )
 }
 
-/// Кто из работающих процессов больше похож на игру.
+/// Порт, на котором обычно живут игры.
 ///
-/// Признак — внешние соединения на портах, отличных от 80 и 443. Сайты
-/// ходят по вебовым портам, игры почти всегда по своим: Steam на 27015-27068,
-/// Riot в районе 5000, и так далее. Если таких нет вовсе, берём того, у кого
-/// просто больше всего внешних адресов, — это лучше, чем не ответить ничего.
+/// Диапазоны взяты из того, что игры действительно используют: Battle.net
+/// на 1119, Xbox на 3074, Riot около 5000-5500 и 7000-8000, Steam и
+/// источники на 27000-27100. Всё прочее выше 1024 считаем возможным, но
+/// слабым признаком — вес у него меньше.
+fn игровой_порт(port: u16) -> bool {
+    matches!(port, 1119 | 3074 | 3478..=3480 | 5000..=5500 | 6112..=6119 | 7000..=8000 | 27000..=27200)
+}
+
+/// Насколько соединение похоже на игровое. Ноль — не похоже вовсе.
+fn вес(proto: Proto, port: u16) -> u32 {
+    // Известный служебный порт перекрывает всё: диапазоны игр широкие и
+    // задевают чужое. 5228 (уведомления Google) попадает в «риотовские»
+    // 5000-5500, и именно на этом эвристика однажды приняла службу HP за
+    // игру. Сначала отсекаем известное, потом смотрим на игровое.
+    if port < 1024 || служебный_порт(port) {
+        return 0;
+    }
+    match (proto, игровой_порт(port)) {
+        // UDP на игровом порту — самый сильный признак: так ходит сам матч,
+        // а фоновые службы этого почти не делают.
+        (Proto::Udp, true) => 8,
+        (Proto::Tcp, true) => 4,
+        // UDP на произвольном высоком порту — слабее, но тоже довод.
+        (Proto::Udp, false) => 3,
+        // А вот TCP на случайном высоком порту не значит ничего: так ходит
+        // половина фоновых программ.
+        (Proto::Tcp, false) => 0,
+    }
+}
+
+/// Кандидат в игру: процесс и чем он себя выдал.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Candidate {
+    pub name: String,
+    /// Сумма весов соединений — по ней и сортируем.
+    pub score: u32,
+    /// Сколько разных внешних адресов.
+    pub addrs: usize,
+    /// Порты, по которым его посчитали похожим на игру.
+    pub ports: Vec<u16>,
+}
+
+/// Кто из работающих процессов похож на игру, лучшие первыми.
+///
+/// Считаем по ПОЛОЖИТЕЛЬНЫМ признакам, а не по отсутствию в чёрном списке.
+/// Прежняя версия брала всё, что ходит не по 80 и 443, и однажды уверенно
+/// назвала игрой службу HP: та стучалась на 5228, порт уведомлений Google.
+/// Чёрным списком это не лечится — фоновых процессов сотни, и перечислить
+/// их нельзя. А вот признаки игры перечислить можно: UDP на высоком порту и
+/// известные игровые диапазоны.
+///
+/// Пусто — значит не нашли. Это честный ответ: лучше сказать «запусти игру»,
+/// чем собрать адреса постороннего процесса и положить их в обход.
 ///
 /// Чистая функция: соединения и имена собирает вызывающий.
-pub fn guess_game(
+pub fn candidates(
     conns: &[Conn],
     names: &std::collections::HashMap<u32, String>,
-) -> Option<String> {
+) -> Vec<Candidate> {
     use std::collections::HashMap;
-    let mut своими: HashMap<&str, BTreeSet<String>> = HashMap::new();
-    let mut любыми: HashMap<&str, BTreeSet<String>> = HashMap::new();
+    let mut acc: HashMap<&str, (u32, BTreeSet<String>, BTreeSet<u16>)> = HashMap::new();
     for c in conns {
         if !is_external(&c.ip) {
             continue;
         }
-        let Some(name) = names.get(&c.pid) else { continue };
-        if !похоже_на_игру(name) {
+        let w = вес(c.proto, c.port);
+        if w == 0 {
             continue;
         }
-        любыми.entry(name).or_default().insert(c.ip.to_string());
-        if c.port != 80 && c.port != 443 {
-            своими.entry(name).or_default().insert(c.ip.to_string());
-        }
+        let Some(name) = names.get(&c.pid) else { continue };
+        let e = acc.entry(name).or_default();
+        e.0 += w;
+        e.1.insert(c.ip.to_string());
+        e.2.insert(c.port);
     }
-    let лучший = |m: &HashMap<&str, BTreeSet<String>>| -> Option<String> {
-        m.iter()
-            .max_by_key(|(n, v)| (v.len(), std::cmp::Reverse(n.to_string())))
-            .map(|(n, _)| n.to_string())
-    };
-    лучший(&своими).or_else(|| лучший(&любыми))
+    let mut out: Vec<Candidate> = acc
+        .into_iter()
+        .map(|(name, (score, addrs, ports))| Candidate {
+            name: name.to_string(),
+            score,
+            addrs: addrs.len(),
+            ports: ports.into_iter().collect(),
+        })
+        .collect();
+    // По убыванию веса, а при равенстве — по имени, чтобы порядок не плясал
+    // от запуска к запуску.
+    out.sort_by(|a, b| b.score.cmp(&a.score).then(a.name.cmp(&b.name)));
+    out
+}
+
+/// Самый вероятный кандидат, если он есть.
+pub fn guess_game(
+    conns: &[Conn],
+    names: &std::collections::HashMap<u32, String>,
+) -> Option<String> {
+    candidates(conns, names).into_iter().next().map(|c| c.name)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,7 +287,12 @@ pub struct ScanResult {
 /// соединения — матчмейкинг успевает открыть и закрыть их за это время.
 /// Пустой `images` означает «найди сам»: на первом же тике берём процесс,
 /// больше всего похожий на игру, и дальше следим только за ним.
-pub fn scan(images: &[String], total: Duration, step: Duration) -> ScanResult {
+pub fn scan(
+    images: &[String],
+    total: Duration,
+    step: Duration,
+    mut progress: impl FnMut(&str, usize),
+) -> ScanResult {
     let started = Instant::now();
     let mut images: Vec<String> = images.to_vec();
     let mut угадан: Option<String> = None;
@@ -236,6 +304,21 @@ pub fn scan(images: &[String], total: Duration, step: Duration) -> ScanResult {
         }
     }
     let images = images;
+    // Искать нечего — не занимать полминуты молчанием. Раньше цикл честно
+    // отрабатывал всё время, ничего не делая, и человек ждал впустую.
+    if images.is_empty() {
+        return ScanResult {
+            running: false,
+            addrs: Vec::new(),
+            tcp_ports: Vec::new(),
+            udp_ports: Vec::new(),
+            ticks: 0,
+            note: "не нашлось ни одного процесса, похожего на игру. Запусти игру, \
+                   зайди в меню и попробуй снова"
+                .into(),
+        };
+    }
+    progress(images.first().map(|s| s.as_str()).unwrap_or(""), 0);
     let mut addrs: BTreeSet<String> = BTreeSet::new();
     let mut tcp: BTreeSet<u16> = BTreeSet::new();
     let mut udp: BTreeSet<u16> = BTreeSet::new();
@@ -258,6 +341,7 @@ pub fn scan(images: &[String], total: Duration, step: Duration) -> ScanResult {
             }
         }
         ticks += 1;
+        progress(images.first().map(|s| s.as_str()).unwrap_or(""), addrs.len());
         let left = total.saturating_sub(started.elapsed());
         if left.is_zero() {
             break;
@@ -268,10 +352,6 @@ pub fn scan(images: &[String], total: Duration, step: Duration) -> ScanResult {
     let mut note = describe(running, addrs.len(), ticks);
     if let Some(g) = &угадан {
         note = format!("процесс: {g}. {note}");
-    } else if images.is_empty() {
-        note = "не нашлось ни одного процесса, похожего на игру — запусти её и \
-                попробуй снова"
-            .into();
     }
     ScanResult {
         running,
@@ -524,17 +604,67 @@ mod unit_tests {
     }
 
     #[test]
-    fn без_игровых_портов_берём_самого_активного_но_не_браузер() {
+    fn без_признаков_игры_честно_отвечаем_что_не_нашли() {
         use std::collections::HashMap;
+        // Никто не ходит по игровым портам: только веб. Прежняя версия
+        // выбирала «самого активного», и это было выдумкой — теперь
+        // ответ «не нашли», а интерфейс попросит запустить игру.
         let names: HashMap<u32, String> = [
             (1, "chrome.exe".to_string()),
-            (2, "RocketLeague.exe".to_string()),
+            (2, "SomeApp.exe".to_string()),
         ]
         .into_iter()
         .collect();
-        let c = |pid, ip: &str| Conn { pid, proto: Proto::Tcp, ip: ip.parse().unwrap(), port: 443 };
-        let conns = vec![c(1, "1.1.1.1"), c(1, "1.1.1.2"), c(2, "8.8.8.8")];
-        assert_eq!(guess_game(&conns, &names).as_deref(), Some("RocketLeague.exe"));
+        let c = |pid, ip: &str, port| Conn { pid, proto: Proto::Tcp, ip: ip.parse().unwrap(), port };
+        let conns = vec![c(1, "1.1.1.1", 443), c(1, "1.1.1.2", 80), c(2, "8.8.8.8", 443)];
+        assert_eq!(guess_game(&conns, &names), None);
+        assert!(candidates(&conns, &names).is_empty());
+    }
+
+    #[test]
+    fn служебный_порт_за_игру_не_сходит() {
+        use std::collections::HashMap;
+        // Ровно тот случай, на котором эвристика однажды и попалась:
+        // служба HP стучалась на 5228 — это уведомления Google, не игра.
+        let names: HashMap<u32, String> = [(1, "happd.exe".to_string())].into_iter().collect();
+        let conns = vec![Conn {
+            pid: 1,
+            proto: Proto::Tcp,
+            ip: "142.250.153.188".parse().unwrap(),
+            port: 5228,
+        }];
+        assert_eq!(guess_game(&conns, &names), None);
+    }
+
+    #[test]
+    fn udp_на_высоком_порту_весит_больше_веба() {
+        use std::collections::HashMap;
+        let names: HashMap<u32, String> = [
+            (1, "launcher.exe".to_string()),
+            (2, "VALORANT-Win64-Shipping.exe".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        // Лаунчер держит кучу TCP на игровом порту, игра — один UDP.
+        let mut conns: Vec<Conn> = (0..3)
+            .map(|i| Conn {
+                pid: 1,
+                proto: Proto::Tcp,
+                ip: format!("104.16.0.{i}").parse().unwrap(),
+                port: 7000,
+            })
+            .collect();
+        conns.push(Conn {
+            pid: 2,
+            proto: Proto::Udp,
+            ip: "162.159.1.1".parse().unwrap(),
+            port: 5060,
+        });
+        let c = candidates(&conns, &names);
+        // Оба попали в кандидаты — выбор остаётся за человеком.
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert!(c.iter().any(|x| x.name.contains("VALORANT")), "{c:?}");
+        assert!(c.iter().any(|x| x.name == "launcher.exe"), "{c:?}");
     }
 
     #[test]
@@ -617,9 +747,12 @@ mod unit_tests {
     #[ignore]
     fn живой_скан_таблицы_соединений() {
         let all = connections();
-        println!("всего соединений: {}", all.len());
         let ext = all.iter().filter(|c| is_external(&c.ip)).count();
-        println!("из них внешних: {ext}");
+        println!("соединений: {}, из них внешних: {ext}", all.len());
+        let names = process_names();
+        for c in candidates(&all, &names) {
+            println!("кандидат: {} вес={} адресов={} порты={:?}", c.name, c.score, c.addrs, c.ports);
+        }
         assert!(!all.is_empty(), "таблица соединений пуста — netstat не отработал");
     }
 }

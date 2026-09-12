@@ -152,6 +152,11 @@
       response: { verdict: 'blocked', reason: 'запрос проходит, а рукопожатие не завершается ни разу — режут ОТВЕТ', target: 0, control: 2, repeats: 2 },
     }),
     getGameScan: async () => ({ saved: 12, gameFilter: 'tcp' }),
+    gameCandidates: async () => [
+      { name: 'cs2.exe', score: 12, addrs: 3, ports: [27015, 27018] },
+      { name: 'steam.exe', score: 4, addrs: 1, ports: [27023] },
+    ],
+    onGameScan: () => () => {},
     scanGameTraffic: async () => ({
       running: true,
       addrs: ['104.16.0.1', '162.159.135.232', '155.133.226.76'],

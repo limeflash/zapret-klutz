@@ -1534,6 +1534,14 @@ pub fn get_game_scan(state: State<AppState>) -> GameScanState {
     }
 }
 
+/// Кто сейчас похож на игру. Пусто — значит ничего не нашли, и это честный
+/// ответ: собрать адреса постороннего процесса хуже, чем не собрать ничего.
+#[tauri::command(async)]
+pub fn game_candidates() -> Vec<crate::gamescan::Candidate> {
+    let names = crate::gamescan::process_names();
+    crate::gamescan::candidates(&crate::gamescan::connections(), &names)
+}
+
 /// Сканирует, пока идёт указанное время, и сразу кладёт найденное в список.
 ///
 /// Имена процессов приходят из интерфейса и в командную строку НЕ уезжают:
@@ -1542,6 +1550,7 @@ pub fn get_game_scan(state: State<AppState>) -> GameScanState {
 /// мегабайт просто съест память.
 #[tauri::command(async)]
 pub fn scan_game_traffic(
+    app: AppHandle,
     state: State<AppState>,
     images: Vec<String>,
     seconds: Option<u64>,
@@ -1556,13 +1565,30 @@ pub fn scan_game_traffic(
     // Пусто — значит «найди сам»: спрашивать имя процесса у человека,
     // который просто хочет, чтобы игра работала, — плохая мысль.
     let secs = seconds.unwrap_or(30).clamp(5, 300);
+    // Полминуты без единого признака жизни — плохой опыт. Шлём, что нашли
+    // и у какого процесса, прямо по ходу.
+    let app2 = app.clone();
     let r = crate::gamescan::scan(
         &images,
         std::time::Duration::from_secs(secs),
         std::time::Duration::from_secs(2),
+        |proc, found| {
+            let _ = app2.emit("game-scan", serde_json::json!({ "proc": proc, "found": found }));
+        },
     );
-    if !r.addrs.is_empty() {
-        crate::gamescan::save_ips(&root, &r.addrs)?;
+    if r.addrs.is_empty() {
+        return Ok(r);
+    }
+    crate::gamescan::save_ips(&root, &r.addrs)?;
+
+    // Списки winws читает при запуске. Без перезапуска собранные адреса
+    // лежали бы в файле, ничего не меняя, — человек решил бы, что сбор не
+    // работает. Перезапускаем только то, что уже работало.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
     }
     Ok(r)
 }

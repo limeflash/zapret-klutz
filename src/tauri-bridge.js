@@ -90,6 +90,11 @@
     setAutoUpdate: (enabled) => invoke('set_auto_update', { enabled }),
     checkBypassChance: () => invoke('check_bypass_chance'),
     getGameScan: () => invoke('get_game_scan'),
+    gameCandidates: () => invoke('game_candidates'),
+    onGameScan: (cb) => {
+      const un = listen('game-scan', (e) => cb(e.payload));
+      return () => un.then((f) => f());
+    },
     scanGameTraffic: (images, seconds) => invoke('scan_game_traffic', { images, seconds: seconds || null }),
     clearGameIps: () => invoke('clear_game_ips'),
     getExtraStrategies: () => invoke('get_extra_strategies'),
