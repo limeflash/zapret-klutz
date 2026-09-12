@@ -8,11 +8,187 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Имя для контрольного замера. `example.com` зарезервирован IANA под
+/// примеры, в блок-листы не попадает и у провайдеров не режется — именно
+/// это здесь и нужно.
+pub const NEUTRAL_SNI: &str = "example.com";
+
+/// Почему проба не прошла. Раньше на этом месте была строка, куда падало то
+/// число из curl, то текст ошибки, то «no-response»: показать можно, а
+/// ветвиться нельзя. Код стабильный и разложен по стадиям — по нему
+/// принимает решение самолечение.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCode {
+    Ok,
+    /// Имя не разрешается.
+    Dns,
+    /// До порта не достучались: отказано или нет маршрута.
+    TcpRefused,
+    /// Молчание на любой стадии — самый частый почерк блокировки.
+    Timeout,
+    /// TCP поднялся, а рукопожатие TLS не состоялось: сброс или обрыв сразу
+    /// после ClientHello. Классическая подпись DPI по имени.
+    TlsFailed,
+    /// Сертификат не прошёл проверку — но он БЫЛ. Значит байты дошли до
+    /// сервера и вернулись, путь живой.
+    TlsCert,
+    /// Соединение установилось и тут же закрылось без единого байта ответа.
+    EmptyReply,
+    /// HTTP 451 — «недоступно по юридическим причинам». Типизированный
+    /// блок: путь для клиента непригоден, но и стратегия его не чинит.
+    HttpBlocked,
+    Unknown,
+}
+
+impl FailureCode {
+    /// Сервер жив и ответил сам. Отличать это от блокировки критично: на
+    /// собственную политику сервера (403 на HEAD, ошибка сертификата,
+    /// требование клиентского сертификата) никакая стратегия обхода не
+    /// влияет, и перебирать их бессмысленно.
+    /// Отдельного кода «сервер ответил HTTP» здесь нет намеренно: удавшийся
+    /// HTTP-обмен — это успех, а не «провал, но сервер жив». Остаётся один
+    /// случай: рукопожатие не состоялось, а сертификат мы всё-таки получили.
+    pub fn server_reachable(self) -> bool {
+        matches!(self, FailureCode::TlsCert)
+    }
+
+    /// Дошли ли мы вообще до стадии TLS. Если нет — режут адрес или порт,
+    /// и про имя говорить рано.
+    fn reached_tls(self) -> bool {
+        !matches!(self, FailureCode::Dns | FailureCode::TcpRefused)
+    }
+
+    /// Нужен ли контрольный замер. Лишнее рукопожатие платим только там,
+    /// где оно что-то решает: имя ушло на провод, а ответа не было.
+    pub fn needs_control(self) -> bool {
+        self != FailureCode::Ok && self.reached_tls() && !self.server_reachable()
+    }
+
+    /// Короткое имя для интерфейса и логов.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureCode::Ok => "ok",
+            FailureCode::Dns => "dns",
+            FailureCode::TcpRefused => "tcp_refused",
+            FailureCode::Timeout => "timeout",
+            FailureCode::TlsFailed => "tls_failed",
+            FailureCode::TlsCert => "tls_cert",
+            FailureCode::EmptyReply => "empty_reply",
+            FailureCode::HttpBlocked => "http_451",
+            FailureCode::Unknown => "unknown",
+        }
+    }
+}
+
+/// Где блокируют: по имени или по адресу.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathVerdict {
+    /// Проба прошла, классифицировать нечего.
+    Ok,
+    /// Путь до сервера живой, режут по имени. Наш случай: десинхронизация
+    /// работает именно с этим, перебор стратегий осмыслен.
+    Sni,
+    /// До адреса не доходит ничего, либо доходит, но сервер молчит на любое
+    /// имя. Пакетными техниками это не обходится в принципе — нужен туннель
+    /// или другой адрес.
+    Ip,
+    /// Ответил сам сервер. Его политика, а не цензура.
+    Server,
+}
+
+/// Решает, где блокируют, по результату основной пробы и контрольной.
+///
+/// Приём описан в мануале zapret («Проверка блока по IP») и одинаково
+/// реализован в z2k (MIT, `z2k-detect/internal/prober`): к ТОМУ ЖЕ адресу
+/// стучимся с заведомо не заблокированным именем. Отвечает — путь живой,
+/// значит режут имя. Молчит и на нейтральное — режут адрес.
+///
+/// Контроль обязан быть ДРУГИМ именем на ТОМ ЖЕ адресе. Взяли бы то же
+/// самое — молчали бы оба, и «блок по адресу» получился бы из собственной
+/// ошибки ввода.
+///
+/// Чистая функция: сеть дёргает вызывающий и передаёт сюда результат.
+pub fn classify_path(
+    ok: bool,
+    code: FailureCode,
+    control_ok: bool,
+    control_code: FailureCode,
+) -> (PathVerdict, String) {
+    if ok && !code.server_reachable() {
+        return (PathVerdict::Ok, String::new());
+    }
+    if code.server_reachable() {
+        return (
+            PathVerdict::Server,
+            "ответил сам сервер — это его политика, а не блокировка".into(),
+        );
+    }
+    if code == FailureCode::Dns {
+        return (
+            PathVerdict::Ip,
+            "имя не разрешается — проблема в DNS, а не в обходе".into(),
+        );
+    }
+    if !code.reached_tls() {
+        return (
+            PathVerdict::Ip,
+            "до порта не достучались — режут адрес или порт, не имя".into(),
+        );
+    }
+    if control_ok || control_code.server_reachable() {
+        (
+            PathVerdict::Sni,
+            format!("с нейтральным именем {NEUTRAL_SNI} тот же адрес отвечает — режут по имени"),
+        )
+    } else {
+        (
+            PathVerdict::Ip,
+            format!("с нейтральным именем {NEUTRAL_SNI} тот же адрес тоже молчит — режут адрес, не имя"),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProbeResult {
     pub ok: bool,
     pub ms: u64,
     pub reason: Option<String>,
+    pub code: FailureCode,
+}
+
+/// Коды выхода curl — стабильная и документированная таблица, так что
+/// раскладывать их по стадиям надёжнее, чем разбирать текст ошибки.
+fn code_from_curl(exit: i32, status: Option<u16>) -> (bool, FailureCode) {
+    match exit {
+        0 => match status {
+            // 451 — «недоступно по юридическим причинам». Единственный
+            // HTTP-код, который сам по себе означает блокировку.
+            Some(451) => (false, FailureCode::HttpBlocked),
+            // Любой другой ответ доказывает, что сервер жив. Считать 403
+            // провалом нельзя: часть игровых эндпоинтов законно отвечает им
+            // на HEAD, и цель загоралась бы красным при рабочем сервисе.
+            Some(s) if (200..600).contains(&s) => (true, FailureCode::Ok),
+            _ => (false, FailureCode::Unknown),
+        },
+        6 => (false, FailureCode::Dns),
+        7 => (false, FailureCode::TcpRefused),
+        28 => (false, FailureCode::Timeout),
+        // 35 — обрыв при установке TLS, 56 — сброс при приёме данных.
+        35 | 56 => (false, FailureCode::TlsFailed),
+        52 => (false, FailureCode::EmptyReply),
+        // 51/60 — сертификат не прошёл проверку. Сервер при этом ОТВЕТИЛ.
+        51 | 60 => (false, FailureCode::TlsCert),
+        _ => (false, FailureCode::Unknown),
+    }
+}
+
+fn reason_text(code: FailureCode) -> Option<String> {
+    match code {
+        FailureCode::Ok => None,
+        other => Some(other.as_str().to_string()),
+    }
 }
 
 /// Настоящий HTTPS-запрос через curl.
@@ -22,40 +198,55 @@ pub struct ProbeResult {
 /// завершился. Голая TCP-проба поэтому возвращает «ОК» ровно до того места,
 /// где соединение и убивают, и показывает зелёный статус при нерабочем
 /// сервисе. Полный запрос доходит до TLS и видит реальную картину.
-pub fn http_probe(url: &str, timeout_sec: u64) -> ProbeResult {
+///
+/// `pin_ip` прибивает запрос к конкретному адресу (`--resolve`). Это нужно
+/// контрольному замеру: сравнивать имена имеет смысл только на ОДНОМ адресе,
+/// иначе разница объясняется разными серверами, а не блокировкой.
+pub fn http_probe_pinned(host: &str, port: u16, pin_ip: Option<&str>, timeout_sec: u64) -> ProbeResult {
     let started = Instant::now();
+    let scheme = if port == 443 { "https" } else { "http" };
+    let url = format!("{scheme}://{host}");
+
     #[allow(unused_mut)]
     let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
-    cmd.args([
-        "-s",
-        "-o",
-        "NUL",
-        "-w",
-        "%{http_code}",
-        "-m",
-        &timeout_sec.to_string(),
-        "-I",
-        url,
-    ]);
+    cmd.args(["-s", "-o", "NUL", "-w", "%{http_code}", "-m", &timeout_sec.to_string()]);
+    if let Some(ip) = pin_ip {
+        cmd.args(["--resolve", &format!("{host}:{port}:{ip}")]);
+    }
+    cmd.args(["-I", &url]);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     match cmd.output() {
         Ok(out) => {
-            let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let ok = code.len() == 3 && code.chars().all(|c| c.is_ascii_digit()) && !code.starts_with('0');
+            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let status = raw.parse::<u16>().ok().filter(|s| *s >= 100);
+            let exit = out.status.code().unwrap_or(-1);
+            let (ok, code) = code_from_curl(exit, status);
             ProbeResult {
                 ok,
                 ms: started.elapsed().as_millis() as u64,
-                reason: if ok { None } else { Some(if code.is_empty() { "no-response".into() } else { code }) },
+                reason: reason_text(code),
+                code,
             }
         }
         Err(e) => ProbeResult {
             ok: false,
             ms: started.elapsed().as_millis() as u64,
             reason: Some(e.to_string()),
+            code: FailureCode::Unknown,
         },
     }
+}
+
+/// Первый адрес, в который разрешается имя. Контрольный замер обязан идти в
+/// тот же самый — иначе сравнивать нечего.
+pub fn first_ip(host: &str, port: u16) -> Option<String> {
+    (host, port)
+        .to_socket_addrs()
+        .ok()?
+        .next()
+        .map(|a| a.ip().to_string())
 }
 
 /// TCP-хендшейк — для игровых серверов, где HTTP отсутствует как таковой.
@@ -64,11 +255,12 @@ pub fn tcp_probe(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
     let started = Instant::now();
     let addr_iter = match (host, port).to_socket_addrs() {
         Ok(it) => it,
-        Err(e) => {
+        Err(_) => {
             return ProbeResult {
                 ok: false,
                 ms: started.elapsed().as_millis() as u64,
-                reason: Some(format!("dns: {e}")),
+                reason: Some("dns".into()),
+                code: FailureCode::Dns,
             }
         }
     };
@@ -86,6 +278,7 @@ pub fn tcp_probe(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
                 ok: true,
                 ms: started.elapsed().as_millis() as u64,
                 reason: None,
+                code: FailureCode::Ok,
             };
         }
     }
@@ -93,5 +286,76 @@ pub fn tcp_probe(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
         ok: false,
         ms: started.elapsed().as_millis() as u64,
         reason: Some("timeout".into()),
+        code: FailureCode::Timeout,
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn контроль_отвечает_значит_режут_имя() {
+        let (v, why) = classify_path(false, FailureCode::TlsFailed, true, FailureCode::Ok);
+        assert_eq!(v, PathVerdict::Sni);
+        assert!(why.contains(NEUTRAL_SNI));
+    }
+
+    #[test]
+    fn контроль_тоже_молчит_значит_режут_адрес() {
+        let (v, _) = classify_path(false, FailureCode::TlsFailed, false, FailureCode::Timeout);
+        assert_eq!(v, PathVerdict::Ip);
+    }
+
+    #[test]
+    fn ответ_сервера_не_блокировка() {
+        // Сертификат не прошёл проверку — но он БЫЛ, значит сервер жив.
+        let (v, _) = classify_path(false, FailureCode::TlsCert, false, FailureCode::Timeout);
+        assert_eq!(v, PathVerdict::Server);
+    }
+
+    #[test]
+    fn до_порта_не_дошли_контроль_не_спрашиваем() {
+        // Контроль тут неинформативен: имени на проводе ещё не было.
+        for code in [FailureCode::TcpRefused, FailureCode::Dns] {
+            let (v, _) = classify_path(false, code, true, FailureCode::Ok);
+            assert_eq!(v, PathVerdict::Ip, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn успешная_проба_не_классифицируется() {
+        let (v, why) = classify_path(true, FailureCode::Ok, false, FailureCode::Timeout);
+        assert_eq!(v, PathVerdict::Ok);
+        assert!(why.is_empty());
+    }
+
+    #[test]
+    fn контроль_с_чужим_сертификатом_считается_ответом() {
+        // Нейтральное имя прибито к чужому адресу, сертификат не совпадёт —
+        // но ответ TLS-уровня получен, значит путь живой.
+        let (v, _) = classify_path(false, FailureCode::TlsFailed, false, FailureCode::TlsCert);
+        assert_eq!(v, PathVerdict::Sni);
+    }
+
+    #[test]
+    fn коды_curl_раскладываются_по_стадиям() {
+        assert_eq!(code_from_curl(0, Some(200)), (true, FailureCode::Ok));
+        assert_eq!(code_from_curl(0, Some(403)), (true, FailureCode::Ok));
+        assert_eq!(code_from_curl(0, Some(451)), (false, FailureCode::HttpBlocked));
+        assert_eq!(code_from_curl(6, None), (false, FailureCode::Dns));
+        assert_eq!(code_from_curl(7, None), (false, FailureCode::TcpRefused));
+        assert_eq!(code_from_curl(28, None), (false, FailureCode::Timeout));
+        assert_eq!(code_from_curl(35, None), (false, FailureCode::TlsFailed));
+        assert_eq!(code_from_curl(56, None), (false, FailureCode::TlsFailed));
+        assert_eq!(code_from_curl(60, None), (false, FailureCode::TlsCert));
+    }
+
+    #[test]
+    fn код_ноль_ноль_ноль_больше_не_успех() {
+        // Старое правило «три цифры и не начинается с нуля» пропускало
+        // только 000; теперь опираемся на код выхода curl, а не на текст.
+        assert!(!code_from_curl(35, Some(0)).0);
+        assert!(!code_from_curl(0, None).0);
     }
 }

@@ -37,9 +37,22 @@
     return [...DEFAULT_TARGETS, ...customTargets];
   }
 
+  // Разные вердикты у разных упавших целей — чтобы на стенде было видно все
+  // три ветки: режут по имени, режут адрес, отказал сам сервер.
+  const FAIL_KINDS = [
+    { verdict: 'sni', code: 'tls_failed', why: 'с нейтральным именем example.com тот же адрес отвечает — режут по имени' },
+    { verdict: 'server', code: 'tls_cert', why: 'ответил сам сервер — это его политика, а не блокировка' },
+  ];
+
   function pingResult(t, i) {
     const ok = i % 5 !== 4;
-    return { name: t.name, host: t.host, port: t.port, ok, ms: ok ? 30 + (i * 7) % 120 : null, pending: false };
+    if (ok) {
+      return { name: t.name, host: t.host, port: t.port, ok, ms: 30 + (i * 7) % 120,
+               pending: false, code: 'ok', verdict: 'ok' };
+    }
+    const k = FAIL_KINDS[(i / 5 | 0) % FAIL_KINDS.length];
+    return { name: t.name, host: t.host, port: t.port, ok: false, ms: null, pending: false,
+             code: k.code, verdict: k.verdict, why: k.why };
   }
 
   const state = {

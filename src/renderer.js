@@ -366,15 +366,17 @@ function renderHero() {
     $('heroDegradedTitle').textContent = failing.length
       ? `Работает, но ${failing.join(' и ')} не ${failing.length > 1 ? 'отвечают' : 'отвечает'}`
       : 'Работает, но не всё отвечает';
+    const note = pathNote(check.targets);
     $('heroDegradedSub').textContent =
-      `Обход запущен, но ${check.ok} из ${check.total} целей отвечают. Это не ошибка приложения — ` +
-      'провайдер мог сменить блокировку. Обычно помогает другой вариант.';
+      `Обход запущен, но ${check.ok} из ${check.total} целей отвечают. ` +
+      (note || 'Это не ошибка приложения — провайдер мог сменить блокировку. Обычно помогает другой вариант.');
   }
 
   if (state === 'failed') {
+    const note = check ? pathNote(check.targets) : '';
     $('heroFailedSub').textContent =
       `Сейчас включён лучший из проверенных — ${displayName(currentState.activeConfig)}, но Discord и YouTube ` +
-      'не отвечают. Иногда помогает соседний вариант или перезапуск через минуту.';
+      'не отвечают. ' + (note || 'Иногда помогает соседний вариант или перезапуск через минуту.');
     renderHeroAlternatives();
   }
 }
@@ -1060,18 +1062,47 @@ let knownTargets = [];
 let targetsLoaded = false;
 let autoCheckTimer = null;
 
+// Бэкенд теперь говорит не только «не отвечает», но и ГДЕ режут: пробует тот
+// же адрес с заведомо чистым именем и сравнивает. Показываем это вместо
+// одинакового «Нет связи» на все случаи жизни.
+const PATH_LABEL = {
+  ip: 'Блок по адресу',
+  server: 'Отказ сервера',
+  sni: 'Режут по имени',
+};
+
 function verdict(t) {
   if (t.pending) return { cls: 'idle', text: '…' };
-  if (!t.ok) return { cls: 'bad', text: 'Нет связи' };
+  if (!t.ok) return { cls: 'bad', text: PATH_LABEL[t.verdict] || 'Нет связи' };
   if (t.ms >= 500) return { cls: 'warn', text: 'Медленно' };
   return { cls: '', text: 'ОК' };
+}
+
+// Одна фраза про то, лечится ли происходящее сменой стратегии. Самое важное,
+// что здесь можно сказать человеку: перебирать варианты или это бесполезно.
+function pathNote(targets) {
+  const failed = (targets || []).filter((t) => !t.ok);
+  if (!failed.length) return '';
+  const every = (v) => failed.every((t) => t.verdict === v);
+  if (every('ip')) {
+    return 'С нейтральным именем те же адреса тоже молчат — режут адрес, а не имя. ' +
+      'Обход такое не обходит: поможет другой адрес или туннель.';
+  }
+  if (every('server')) {
+    return 'Отвечает сам сервер и отказывает по своей политике — это не блокировка, ' +
+      'и стратегия тут ни при чём.';
+  }
+  if (failed.some((t) => t.verdict === 'sni')) {
+    return 'Режут по имени — ровно то, что обход умеет обходить. Обычно помогает другой вариант.';
+  }
+  return '';
 }
 
 function targetRow(t) {
   const v = verdict(t);
   const sub = `${t.host}:${t.port}`;
   return `
-    <div class="trow">
+    <div class="trow"${t.why ? ` title="${esc(t.why)}"` : ''}>
       <div class="tr-name">
         <span class="tr-dot ${v.cls}"></span><span>${esc(t.name)}</span>
       </div>

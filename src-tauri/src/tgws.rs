@@ -401,9 +401,11 @@ mod unit_tests {
 
     #[test]
     fn в_ссылку_вместо_слушающего_адреса_идёт_локальный() {
-        let mut s = TgSettings::default();
-        s.secret = "0123456789abcdef0123456789abcdef".into();
-        s.port = 1443;
+        let mut s = TgSettings {
+            secret: "0123456789abcdef0123456789abcdef".into(),
+            port: 1443,
+            ..TgSettings::default()
+        };
         for listen in ["0.0.0.0", "::", "", "  "] {
             s.host = listen.into();
             assert_eq!(proxy_url(&s), "tg://proxy?server=127.0.0.1&port=1443&secret=dd0123456789abcdef0123456789abcdef");

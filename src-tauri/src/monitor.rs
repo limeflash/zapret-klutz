@@ -7,6 +7,7 @@
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::probe::PathVerdict;
 use crate::state::{save_state, AppState, HealEntry};
 use crate::targets;
 use crate::winws;
@@ -40,6 +41,12 @@ fn service_of(name: &str) -> Option<&'static str> {
 fn is_degraded(results: &[targets::TargetResult]) -> bool {
     let mut groups: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
     for r in results {
+        // Отказ самого сервера (его 403, его сертификат) — не блокировка, и
+        // никакая стратегия его не чинит. Такая цель не голосует ни за, ни
+        // против: считать её провалом значило бы гонять перебор впустую.
+        if r.verdict == PathVerdict::Server {
+            continue;
+        }
         let e = groups.entry(service_of(&r.name).unwrap_or("прочие")).or_insert((0, 0));
         e.1 += 1;
         if r.ok {
@@ -47,6 +54,20 @@ fn is_degraded(results: &[targets::TargetResult]) -> bool {
         }
     }
     groups.values().any(|(ok, total)| *total > 0 && *ok == 0)
+}
+
+/// Есть ли вообще смысл менять стратегию.
+///
+/// Если каждая упавшая цель упала с вердиктом «режут адрес», перебирать
+/// нечего: пакетные техники блок по IP не обходят в принципе. Раньше
+/// самолечение этого не знало и честно сжигало весь рейтинг, меняя стратегию
+/// заодно и для всех остальных целей.
+fn desync_can_help(results: &[targets::TargetResult]) -> bool {
+    let failed: Vec<_> = results.iter().filter(|r| !r.ok && r.verdict != PathVerdict::Server).collect();
+    if failed.is_empty() {
+        return false;
+    }
+    failed.iter().any(|r| r.verdict != PathVerdict::Ip)
 }
 
 pub fn start(app: AppHandle) {
@@ -108,6 +129,22 @@ fn tick(app: &AppHandle) {
         *state.degraded_ticks.lock().unwrap() = 0;
         state.healing_attempts.lock().unwrap().clear();
         *state.heal_exhausted.lock().unwrap() = false;
+        return;
+    }
+
+    // Блок по адресу стратегией не лечится. Считаем тики (человек видит
+    // просадку), но перебор не запускаем и говорим об этом один раз.
+    if !desync_can_help(&results) {
+        *state.degraded_ticks.lock().unwrap() = 0;
+        if !*state.heal_exhausted.lock().unwrap() {
+            *state.heal_exhausted.lock().unwrap() = true;
+            crate::notify::send_from(
+                app,
+                "Блокировка по адресу",
+                "Цели не отвечают и с нейтральным именем на тот же адрес — режут адрес, а не имя. \
+                 Обход этого не обойдёт: поможет другой адрес или туннель.",
+            );
+        }
         return;
     }
 
@@ -281,7 +318,22 @@ mod unit_tests {
     use crate::targets::TargetResult;
 
     fn t(name: &str, ok: bool) -> TargetResult {
-        TargetResult { name: name.into(), host: "h".into(), port: 443, ok, ms: 1, reason: None, probe: "http" }
+        mk(name, ok, if ok { PathVerdict::Ok } else { PathVerdict::Sni })
+    }
+
+    fn mk(name: &str, ok: bool, verdict: PathVerdict) -> TargetResult {
+        TargetResult {
+            name: name.into(),
+            host: "h".into(),
+            port: 443,
+            ok,
+            ms: 1,
+            reason: None,
+            probe: "http",
+            code: if ok { crate::probe::FailureCode::Ok } else { crate::probe::FailureCode::TlsFailed },
+            verdict,
+            why: None,
+        }
     }
 
     /// Стандартные ключевые цели: четыре Discord и три YouTube.
@@ -306,7 +358,7 @@ mod unit_tests {
         let r = целиком(true, false);
         let ok = r.iter().filter(|x| x.ok).count();
         assert_eq!(ok, 4);
-        assert!(!(ok * 2 < r.len()), "старое условие тут молчало");
+        assert!(ok * 2 >= r.len(), "старое условие тут молчало");
     }
 
     #[test]
@@ -321,6 +373,44 @@ mod unit_tests {
         assert_eq!(service_of("Discord Main"), Some("discord"));
         assert_eq!(service_of("YOUTUBE Web"), Some("youtube"));
         assert_eq!(service_of("Steam"), None);
+    }
+
+    #[test]
+    fn отказ_самого_сервера_не_считается_просадкой() {
+        // Сервер ответил своим 403 или своим сертификатом. Стратегия этого
+        // не чинит, и голосовать за перебор такая цель не должна.
+        let r = vec![
+            mk("Discord Main", false, PathVerdict::Server),
+            mk("Discord CDN", false, PathVerdict::Server),
+            mk("YouTube Web", true, PathVerdict::Ok),
+        ];
+        assert!(!is_degraded(&r), "отказ сервера — не повод переключать стратегию");
+        assert!(!desync_can_help(&r), "и перебирать тут нечего");
+    }
+
+    #[test]
+    fn блок_по_адресу_перебор_не_запускает() {
+        let r = vec![
+            mk("Discord Main", false, PathVerdict::Ip),
+            mk("Discord CDN", false, PathVerdict::Ip),
+        ];
+        assert!(is_degraded(&r), "просадка есть — человек её видит");
+        assert!(!desync_can_help(&r), "но стратегией она не лечится");
+    }
+
+    #[test]
+    fn блок_по_имени_перебор_запускает() {
+        let r = vec![
+            mk("Discord Main", false, PathVerdict::Sni),
+            mk("Discord CDN", false, PathVerdict::Ip),
+        ];
+        assert!(desync_can_help(&r), "хоть одна цель режется по имени — пробуем");
+    }
+
+    #[test]
+    fn всё_отвечает_перебирать_нечего() {
+        let r = vec![mk("Discord Main", true, PathVerdict::Ok)];
+        assert!(!desync_can_help(&r));
     }
 
     #[test]

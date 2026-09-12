@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::probe::{http_probe, tcp_probe, ProbeResult};
+use crate::probe::{
+    classify_path, first_ip, http_probe_pinned, tcp_probe, FailureCode, PathVerdict, NEUTRAL_SNI,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Target {
@@ -58,16 +60,68 @@ pub struct TargetResult {
     pub reason: Option<String>,
     /// Каким способом проверяли — в интерфейсе видно, чему верить.
     pub probe: &'static str,
+    /// Код отказа по стадиям — по нему ветвится самолечение.
+    pub code: FailureCode,
+    /// Где блокируют: по имени, по адресу, или это вообще сам сервер.
+    pub verdict: PathVerdict,
+    /// Человеческое объяснение вердикта. Пусто, когда объяснять нечего.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
 }
 
 /// Сайты (80/443) проверяем настоящим HTTPS-запросом, всё остальное —
 /// TCP-хендшейком: у игровых серверов на своих портах HTTP просто нет.
-fn probe_target(t: &Target) -> (ProbeResult, &'static str) {
-    if t.port == 443 || t.port == 80 {
-        let scheme = if t.port == 443 { "https" } else { "http" };
-        (http_probe(&format!("{scheme}://{}", t.host), 4), "http")
+///
+/// На провалившейся пробе делаем второй замер — тем же адресом, но с
+/// заведомо чистым именем. Это единственный способ отличить «режут имя»
+/// (десинхронизация поможет) от «режут адрес» (не поможет ничто).
+fn probe_target(t: &Target) -> TargetResult {
+    let (r, probe, verdict, why) = if t.port == 443 || t.port == 80 {
+        // Основную пробу тоже прибиваем к адресу: сравнивать имена имеет
+        // смысл только на ОДНОМ адресе, иначе разницу объясняют разные
+        // серверы, а не блокировка.
+        let ip = first_ip(&t.host, t.port);
+        let main = http_probe_pinned(&t.host, t.port, ip.as_deref(), 4);
+
+        let (verdict, why) = if main.code.needs_control() {
+            match ip.as_deref() {
+                Some(ip) => {
+                    let c = http_probe_pinned(NEUTRAL_SNI, t.port, Some(ip), 4);
+                    classify_path(main.ok, main.code, c.ok, c.code)
+                }
+                // Адреса нет — контроль невозможен, врать вердиктом не будем.
+                None => classify_path(main.ok, main.code, false, FailureCode::Unknown),
+            }
+        } else {
+            classify_path(main.ok, main.code, false, FailureCode::Unknown)
+        };
+        (main, "http", verdict, why)
     } else {
-        (tcp_probe(&t.host, t.port, 4000), "tcp")
+        // На своём порту имени в трафике нет вовсе: ни SNI, ни Host. Значит
+        // блокировать могут только адрес или порт — спрашивать контроль не о чем.
+        let r = tcp_probe(&t.host, t.port, 4000);
+        let (verdict, why) = if r.ok {
+            (PathVerdict::Ok, String::new())
+        } else {
+            (
+                PathVerdict::Ip,
+                "порт не отвечает, а имени в трафике нет — обходить нечего".to_string(),
+            )
+        };
+        (r, "tcp", verdict, why)
+    };
+
+    TargetResult {
+        name: t.name.clone(),
+        host: t.host.clone(),
+        port: t.port,
+        ok: r.ok,
+        ms: r.ms,
+        reason: r.reason,
+        probe,
+        code: r.code,
+        verdict,
+        why: if why.is_empty() { None } else { Some(why) },
     }
 }
 
@@ -75,18 +129,7 @@ pub fn check_targets(targets: &[Target]) -> Vec<TargetResult> {
     let handles: Vec<_> = targets
         .iter()
         .cloned()
-        .map(|t| std::thread::spawn(move || {
-            let (r, probe) = probe_target(&t);
-            TargetResult {
-                name: t.name,
-                host: t.host,
-                port: t.port,
-                ok: r.ok,
-                ms: r.ms,
-                reason: r.reason,
-                probe,
-            }
-        }))
+        .map(|t| std::thread::spawn(move || probe_target(&t)))
         .collect();
     handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
