@@ -209,6 +209,8 @@
         { at: Date.now() - 40 * 60000, type: 'switch', from: 'general.bat', to: 'general (ALT).bat', ok: true },
         { at: Date.now() - 90 * 60000, type: 'switch', from: 'general (MGTS).bat', to: 'general.bat', ok: false },
       ],
+      workingConfig: 'general (ALT).bat',
+      workingAt: Date.now() - 12 * 60000,
     }),
 
     getAutoTestSchedule: async () => ({ enabled: false, days: 14, mode: 'dpi', lastRunAt: null }),

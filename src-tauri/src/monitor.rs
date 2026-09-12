@@ -116,7 +116,15 @@ fn tick(app: &AppHandle) {
     if core.is_empty() {
         return;
     }
+    // Снимок ДО проверки. Она занимает секунды, и за это время стратегию
+    // могли переключить — из трея, из окна или самолечением. Такой результат
+    // измерял ПРЕЖНЮЮ стратегию, и закреплять его за нынешней нельзя.
+    let measured = state.persisted.lock().unwrap().active_config.clone();
     let results = targets::check_targets(&core);
+    let attributable = {
+        let now = state.persisted.lock().unwrap().active_config.clone();
+        measured.is_some() && measured == now
+    };
     let ok = results.iter().filter(|r| r.ok).count();
     let total = results.len();
     *state.last_check.lock().unwrap() = Some((ok, total));
@@ -129,6 +137,11 @@ fn tick(app: &AppHandle) {
         *state.degraded_ticks.lock().unwrap() = 0;
         state.healing_attempts.lock().unwrap().clear();
         *state.heal_exhausted.lock().unwrap() = false;
+        if attributable {
+            if let Some(name) = measured {
+                remember_working(app, &state, &results, &name);
+            }
+        }
         return;
     }
 
@@ -164,6 +177,71 @@ fn tick(app: &AppHandle) {
     attempt_switch(app);
 }
 
+/// Настоящий успех: хотя бы одна цель ответила сама, а не «сервер жив, но
+/// отказал». Отказ сервера (его 403, его сертификат) доказывает, что жив
+/// сервер, а не что работает обход, — закреплять стратегию на таком
+/// основании нельзя.
+fn has_real_success(results: &[targets::TargetResult]) -> bool {
+    results.iter().any(|r| r.ok && r.verdict == PathVerdict::Ok)
+}
+
+/// На что переключаться.
+///
+/// Сначала то, что здесь УЖЕ работало: рейтинг снят прогоном, возможно, много
+/// дней назад и в другой сетевой обстановке, а подтверждённый замером конфиг —
+/// знание свежее и про эту самую сеть. Дальше идёт рейтинг.
+///
+/// Кандидат обязан лежать в списке конфигов релиза: имена приходят из файла
+/// результатов, который пишет чужой скрипт, и строка вида «..\\other.bat»
+/// увела бы запуск за пределы папки.
+fn pick_next(
+    current: Option<&str>,
+    working: Option<&str>,
+    ranked: &[String],
+    tried: &[String],
+    configs: &[String],
+) -> Option<String> {
+    let годится = |c: &str| {
+        Some(c) != current && !tried.iter().any(|t| t == c) && configs.iter().any(|x| x == c)
+    };
+    if let Some(w) = working.filter(|w| годится(w)) {
+        return Some(w.to_string());
+    }
+    ranked.iter().find(|c| годится(c)).cloned()
+}
+
+/// Запоминает стратегию, на которой проверка прошла чисто.
+///
+/// Требуем НАСТОЯЩЕГО успеха хотя бы по одной цели: «сервер ответил сам»
+/// (его 403, его сертификат) доказывает, что жив сервер, а не что работает
+/// обход, и закреплять стратегию на таком основании нельзя.
+///
+/// Пишем только при смене значения — иначе диск дёргался бы каждые полминуты.
+fn remember_working(
+    app: &AppHandle,
+    state: &tauri::State<AppState>,
+    results: &[targets::TargetResult],
+    name: &str,
+) {
+    if !has_real_success(results) {
+        return;
+    }
+    let changed = {
+        let mut p = state.persisted.lock().unwrap();
+        let same = p.working_config.as_deref() == Some(name);
+        p.working_at = Some(now_ms());
+        if same {
+            false
+        } else {
+            p.working_config = Some(name.to_string());
+            true
+        }
+    };
+    if changed {
+        save_state(app, state);
+    }
+}
+
 /// Переключается на следующую стратегию из рейтинга последнего прогона,
 /// пропуская те, что уже пробовали в этой серии.
 fn attempt_switch(app: &AppHandle) {
@@ -173,19 +251,22 @@ fn attempt_switch(app: &AppHandle) {
         None => return,
     };
 
-    let ranked = latest_ranking(&root);
-    if ranked.is_empty() {
-        return;
-    }
-    let current = state.persisted.lock().unwrap().active_config.clone();
+    let (current, working) = {
+        let p = state.persisted.lock().unwrap();
+        (p.active_config.clone(), p.working_config.clone())
+    };
     let tried = state.healing_attempts.lock().unwrap().clone();
     // Имена приходят из файла результатов, который пишет чужой скрипт.
     // Без проверки строка вида «..\\other.bat» увела бы apply_config за
     // пределы папки релиза.
     let configs = crate::release::list_configs(&root);
-    let next = ranked
-        .into_iter()
-        .find(|c| Some(c) != current.as_ref() && !tried.contains(c) && configs.contains(c));
+    let next = pick_next(
+        current.as_deref(),
+        working.as_deref(),
+        &latest_ranking(&root),
+        &tried,
+        &configs,
+    );
 
     let Some(next) = next else {
         // Перепробовали всё — молотить дальше бессмысленно, но и выключать
@@ -373,6 +454,65 @@ mod unit_tests {
         assert_eq!(service_of("Discord Main"), Some("discord"));
         assert_eq!(service_of("YOUTUBE Web"), Some("youtube"));
         assert_eq!(service_of("Steam"), None);
+    }
+
+    #[test]
+    fn подтверждённо_рабочая_стратегия_идёт_первой() {
+        let configs: Vec<String> = ["a.bat", "b.bat", "c.bat"].iter().map(|s| s.to_string()).collect();
+        let ranked: Vec<String> = ["c.bat", "b.bat"].iter().map(|s| s.to_string()).collect();
+        // Рейтинг советует c, но b здесь уже работала — берём b.
+        assert_eq!(
+            pick_next(Some("a.bat"), Some("b.bat"), &ranked, &[], &configs).as_deref(),
+            Some("b.bat")
+        );
+    }
+
+    #[test]
+    fn рабочую_не_предлагаем_если_она_и_включена_или_уже_пробована() {
+        let configs: Vec<String> = ["a.bat", "b.bat", "c.bat"].iter().map(|s| s.to_string()).collect();
+        let ranked: Vec<String> = ["c.bat"].iter().map(|s| s.to_string()).collect();
+        // Она же и активна — предлагать её бессмысленно.
+        assert_eq!(
+            pick_next(Some("b.bat"), Some("b.bat"), &ranked, &[], &configs).as_deref(),
+            Some("c.bat")
+        );
+        // Уже пробовали в этой серии и не помогло.
+        let tried = vec!["b.bat".to_string()];
+        assert_eq!(
+            pick_next(Some("a.bat"), Some("b.bat"), &ranked, &tried, &configs).as_deref(),
+            Some("c.bat")
+        );
+    }
+
+    #[test]
+    fn кандидата_нет_в_релизе_не_предлагаем() {
+        let configs: Vec<String> = ["a.bat"].iter().map(|s| s.to_string()).collect();
+        let ranked: Vec<String> = vec!["..\\чужое.bat".to_string(), "нет-такого.bat".to_string()];
+        assert_eq!(pick_next(Some("a.bat"), Some("тоже-нет.bat"), &ranked, &[], &configs), None);
+    }
+
+    #[test]
+    fn без_рабочей_берём_рейтинг() {
+        let configs: Vec<String> = ["a.bat", "c.bat"].iter().map(|s| s.to_string()).collect();
+        let ranked: Vec<String> = vec!["c.bat".to_string()];
+        assert_eq!(
+            pick_next(Some("a.bat"), None, &ranked, &[], &configs).as_deref(),
+            Some("c.bat")
+        );
+    }
+
+    #[test]
+    fn закрепляем_только_на_настоящем_успехе() {
+        // Ответил сам сервер — обход тут ни при чём.
+        assert!(!has_real_success(&[mk("Discord", false, PathVerdict::Server)]));
+        // Ни одна цель не ответила.
+        assert!(!has_real_success(&[mk("Discord", false, PathVerdict::Sni)]));
+        assert!(!has_real_success(&[]));
+        // Хотя бы одна ответила по-настоящему.
+        assert!(has_real_success(&[
+            mk("Discord", false, PathVerdict::Sni),
+            mk("YouTube", true, PathVerdict::Ok),
+        ]));
     }
 
     #[test]

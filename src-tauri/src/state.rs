@@ -40,6 +40,16 @@ pub struct PersistedState {
     pub autotest_last_run: Option<u64>,
     #[serde(rename = "autotestMode")]
     pub autotest_mode: Option<String>,
+    /// Последняя стратегия, на которой проверка связи прошла ЧИСТО.
+    ///
+    /// `active_config` отвечает на вопрос «что сейчас включено», и это не
+    /// одно и то же: включить можно что угодно, в том числе неработающее.
+    /// Здесь — то, что подтвердилось замером, и это лучшее знание о сети,
+    /// чем рейтинг прогона, снятый когда-то давно.
+    #[serde(rename = "workingConfig")]
+    pub working_config: Option<String>,
+    #[serde(rename = "workingAt")]
+    pub working_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -759,13 +759,22 @@ pub fn set_auto_switch(
 pub struct HealLog {
     ok: bool,
     entries: Vec<crate::state::HealEntry>,
+    /// Последняя стратегия, на которой проверка прошла чисто, и когда это
+    /// было. Не то же самое, что «включено сейчас».
+    #[serde(rename = "workingConfig", skip_serializing_if = "Option::is_none")]
+    working_config: Option<String>,
+    #[serde(rename = "workingAt", skip_serializing_if = "Option::is_none")]
+    working_at: Option<u64>,
 }
 
 #[tauri::command(async)]
 pub fn get_heal_log(state: State<AppState>) -> HealLog {
+    let p = state.persisted.lock().unwrap();
     HealLog {
         ok: true,
-        entries: state.persisted.lock().unwrap().heal_log.clone().unwrap_or_default(),
+        entries: p.heal_log.clone().unwrap_or_default(),
+        working_config: p.working_config.clone(),
+        working_at: p.working_at,
     }
 }
 
