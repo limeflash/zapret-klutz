@@ -140,6 +140,12 @@ fn tick(app: &AppHandle) {
         let now = state.persisted.lock().unwrap().active_config.clone();
         measured.is_some() && measured == now
     };
+    // Проверка заняла секунды. За это время мог начаться прогон тестов —
+    // он крутит стратегию каждые несколько секунд, и всё, что ниже, от
+    // записи результатов до переключения, только мешало бы ему.
+    if *state.testing.lock().unwrap() {
+        return;
+    }
     let ok = results.iter().filter(|r| r.ok).count();
     let total = results.len();
     *state.last_check.lock().unwrap() = Some((ok, total));
@@ -166,12 +172,27 @@ fn tick(app: &AppHandle) {
         *state.degraded_ticks.lock().unwrap() = 0;
         if !*state.heal_exhausted.lock().unwrap() {
             *state.heal_exhausted.lock().unwrap() = true;
-            crate::notify::send_from(
-                app,
-                "Блокировка по адресу",
-                "Цели не отвечают и с нейтральным именем на тот же адрес — режут адрес, а не имя. \
-                 Обход этого не обойдёт: поможет другой адрес или туннель.",
-            );
+            // Текст по фактическому вердикту. Раньше здесь стояло одно
+            // «режут адрес» на оба случая, и цель с ответом 451 получала
+            // рассказ про нейтральное имя, которого ей не задавали.
+            let (title, body) = if results
+                .iter()
+                .filter(|r| !r.ok)
+                .all(|r| r.verdict == PathVerdict::Legal)
+            {
+                (
+                    "Заблокировано по закону",
+                    "Сервер отвечает 451 «недоступно по юридическим причинам». Это не DPI, \
+                     и сменой стратегии такое не лечится.",
+                )
+            } else {
+                (
+                    "Блокировка по адресу",
+                    "Цели не отвечают и с нейтральным именем на тот же адрес — режут адрес, \
+                     а не имя. Обход этого не обойдёт: поможет другой адрес или туннель.",
+                )
+            };
+            crate::notify::send_from(app, title, body);
         }
         return;
     }
@@ -292,6 +313,27 @@ fn attempt_switch(app: &AppHandle) {
         // цели снова ответят, tick() очистит его сам.
         if !tried.is_empty() && !*state.heal_exhausted.lock().unwrap() {
             *state.heal_exhausted.lock().unwrap() = true;
+            // В журнал это писалось только уведомлением: кто его пропустил,
+            // потом не находил в истории никакого следа — почему самолечение
+            // молчит. Интерфейс такую запись рисовать умел давно, а бэкенд
+            // её не создавал ни разу.
+            {
+                let mut p = state.persisted.lock().unwrap();
+                let log = p.heal_log.get_or_insert_with(Vec::new);
+                log.push(HealEntry {
+                    at: now_ms(),
+                    kind: "gave-up".into(),
+                    from: current.clone(),
+                    to: None,
+                    ok: false,
+                    tried_count: tried.len() as u32,
+                });
+                if log.len() > 50 {
+                    let cut = log.len() - 50;
+                    log.drain(0..cut);
+                }
+            }
+            save_state(app, &state);
             crate::notify::send_from(
                 app,
                 "Самолечение перебрало все стратегии",
@@ -317,6 +359,7 @@ fn attempt_switch(app: &AppHandle) {
             from: current.clone(),
             to: Some(next.clone()),
             ok: applied.is_ok(),
+            tried_count: 0,
         });
         if log.len() > 50 {
             let cut = log.len() - 50;

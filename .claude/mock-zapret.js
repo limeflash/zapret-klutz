@@ -211,6 +211,8 @@
       entries: [
         { at: Date.now() - 40 * 60000, type: 'switch', from: 'general.bat', to: 'general (ALT).bat', ok: true },
         { at: Date.now() - 90 * 60000, type: 'switch', from: 'general (MGTS).bat', to: 'general.bat', ok: false },
+        // Запись «сдалось» бэкенд теперь пишет — до этого ветка в рендерере была мёртвой.
+        { at: Date.now() - 120 * 60000, type: 'gave-up', from: 'general.bat', to: null, ok: false, triedCount: 7 },
       ],
       workingConfig: 'general (ALT).bat',
       workingAt: Date.now() - 12 * 60000,

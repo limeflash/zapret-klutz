@@ -49,8 +49,12 @@ const EXTRA_SPLIT_POS: &[(&str, &str)] = &[
 static SPLIT_POS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"--dpi-desync-split-pos=[^\s\^]+").unwrap());
 
-fn variant_name(suffix: &str) -> String {
-    format!("{MARK}{suffix}).bat")
+/// Имя варианта несёт и шаблон, и суффикс. Без шаблона два поколения из
+/// разных конфигов давали одни и те же имена, и второе молча затирало
+/// первое — при том что содержимое у них разное.
+fn variant_name(template: &str, suffix: &str) -> String {
+    let base = template.trim_end_matches(".bat").trim_end_matches(".BAT");
+    format!("{MARK}{base} {suffix}).bat")
 }
 
 pub fn is_variant(name: &str) -> bool {
@@ -99,7 +103,7 @@ pub fn generate(root: &Path, template: &str) -> Result<Vec<String>, String> {
     let mut made = Vec::new();
     for (suffix, pos) in EXTRA_SPLIT_POS {
         let body = SPLIT_POS.replace_all(&text, format!("--dpi-desync-split-pos={pos}").as_str());
-        let name = variant_name(suffix);
+        let name = variant_name(template, suffix);
         fs::write(root.join(&name), body.as_ref()).map_err(|e| format!("{name}: {e}"))?;
         made.push(name);
     }
@@ -123,6 +127,9 @@ pub fn remove_all(root: &Path) -> Result<usize, String> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    /// Образец, из которого генерируем во всех тестах.
+    const TPL: &str = "general.bat";
 
     fn релиз() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -149,6 +156,25 @@ mod unit_tests {
     }
 
     #[test]
+    fn варианты_из_разных_образцов_не_затирают_друг_друга() {
+        // Раньше имя не зависело от образца: сгенерировали из ALT после
+        // general — и файлы с теми же именами молча подменились, хотя
+        // содержимое у них разное.
+        let dir = релиз();
+        fs::write(dir.join("general.bat"), образец()).unwrap();
+        fs::write(dir.join("ALT.bat"), образец().replace("fake", "fakedsplit")).unwrap();
+
+        let a = generate(&dir, "general.bat").unwrap();
+        let b = generate(&dir, "ALT.bat").unwrap();
+        assert_eq!(count(&dir), a.len() + b.len(), "файлы подменили друг друга");
+        for name in &a {
+            assert!(!b.contains(name), "{name} совпало у двух образцов");
+        }
+        // И удаление по-прежнему забирает всё своё разом.
+        assert_eq!(remove_all(&dir).unwrap(), a.len() + b.len());
+    }
+
+    #[test]
     fn создаёт_вариант_на_каждый_набор_позиций() {
         let dir = релиз();
         fs::write(dir.join("general.bat"), образец()).unwrap();
@@ -157,7 +183,7 @@ mod unit_tests {
         assert_eq!(made.len(), EXTRA_SPLIT_POS.len());
         assert_eq!(count(&dir), EXTRA_SPLIT_POS.len());
 
-        let v = fs::read_to_string(dir.join(variant_name("sld1"))).unwrap();
+        let v = fs::read_to_string(dir.join(variant_name(TPL, "sld1"))).unwrap();
         assert!(v.contains("--dpi-desync-split-pos=sld+1"), "{v}");
         // Заменены ОБА вхождения, а не первое.
         assert_eq!(v.matches("--dpi-desync-split-pos=sld+1").count(), 2, "{v}");
@@ -173,7 +199,7 @@ mod unit_tests {
         fs::write(dir.join("general.bat"), образец()).unwrap();
         generate(&dir, "general.bat").unwrap();
 
-        let v = fs::read_to_string(dir.join(variant_name("2sld"))).unwrap();
+        let v = fs::read_to_string(dir.join(variant_name(TPL, "2sld"))).unwrap();
         // В образце два split-pos — ровно столько же должно остаться.
         assert_eq!(v.matches("--dpi-desync-split-pos=").count(), 2, "{v}");
         // Профиль на одном fake позиции разреза не получил.
@@ -201,7 +227,7 @@ mod unit_tests {
         let dir = релиз();
         fs::write(dir.join("general.bat"), образец()).unwrap();
         generate(&dir, "general.bat").unwrap();
-        let e = generate(&dir, &variant_name("sld1")).unwrap_err();
+        let e = generate(&dir, &variant_name(TPL, "sld1")).unwrap_err();
         assert!(e.contains("не другой вариант"), "{e}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -228,7 +254,7 @@ mod unit_tests {
         generate(&dir, "general.bat").unwrap();
 
         // Активен вариант — образцом всё равно берём настоящий конфиг.
-        let t = default_template(&dir, Some(&variant_name("sld1"))).unwrap();
+        let t = default_template(&dir, Some(&variant_name(TPL, "sld1"))).unwrap();
         assert!(!is_variant(&t), "{t}");
         // Активен настоящий — берём именно его.
         assert_eq!(default_template(&dir, Some("general.bat")).as_deref(), Some("general.bat"));

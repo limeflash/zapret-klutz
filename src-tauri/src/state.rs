@@ -74,6 +74,10 @@ pub struct HealEntry {
     pub from: Option<String>,
     pub to: Option<String>,
     pub ok: bool,
+    /// Сколько стратегий было перепробовано к моменту записи. Осмысленно
+    /// только у `gave-up`; у переключения всегда 0.
+    #[serde(rename = "triedCount")]
+    pub tried_count: u32,
 }
 
 pub struct AppState {
@@ -185,7 +189,16 @@ pub fn save_state(app: &AppHandle, state: &AppState) {
     }
 }
 
+/// Сохранения выстроены в очередь. Временный файл один на всех, а зовут
+/// сохранение из двух десятков мест, включая фоновые потоки: два
+/// одновременных вызова писали в один и тот же `state.json.tmp`, и второе
+/// переименование прилетало в `NotFound` — чьё-то изменение пропадало.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 fn try_save_state(app: &AppHandle, state: &AppState) -> std::io::Result<()> {
+    // Замок держим на всю запись, включая переименование. Отравление тут
+    // не страшно: под ним нет ничего, что могло бы оставить данные битыми.
+    let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = app.path().app_data_dir().map_err(std::io::Error::other)?;
     fs::create_dir_all(&dir)?;
     let snapshot = state.persisted.lock().unwrap().clone();
