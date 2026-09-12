@@ -152,6 +152,16 @@ fn push_log_lines(app: &AppHandle, state: &AppState, chunk: &str) {
 /// Electron version. Falls back to nothing (caller decides what "no live
 /// logs" means) when the args can't be extracted, matching the "returns
 /// null, caller falls back to the .bat" contract upstream.
+/// Был ли у последнего запуска живой лог. Глубокому сбору это знать
+/// обязательно: без лога он смотрит в пустоту и сообщал бы, что игра
+/// молчит, хотя молчим мы сами.
+static LAST_RUN_HAD_LOGS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn last_run_had_logs() -> bool {
+    LAST_RUN_HAD_LOGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
     // Во время сбора адресов winws запускается с `--debug`: только тогда он
@@ -237,6 +247,7 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
         watch_by_poll(app);
     }
 
+    LAST_RUN_HAD_LOGS.store(live_logs, std::sync::atomic::Ordering::Relaxed);
     Ok(live_logs)
 }
 

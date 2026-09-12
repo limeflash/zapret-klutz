@@ -1634,6 +1634,18 @@ pub fn scan_game_from_log(
         let _ = crate::gamescan::harvest_stop();
         return Err(format!("Не удалось перезапустить обход: {e}"));
     }
+    // Живой лог есть не всегда. Когда аргументы из .bat разобрать не вышло,
+    // обход поднимается через cmd, а вывод уходит в никуда — и собирать
+    // тогда нечего в принципе. Раньше этот случай молчал: сбор честно ждал
+    // полминуты и сообщал, что игра ничего не отправляла, хотя мы просто
+    // никуда не смотрели.
+    if !crate::winws::last_run_had_logs() {
+        let _ = crate::gamescan::harvest_stop();
+        let _ = crate::monitor::apply_config(&app, &active);
+        return Err("Этот конфиг запускается через .bat, и его вывод нам недоступен — \
+                    глубокий сбор на нём работать не может. Попробуй обычный сбор."
+            .into());
+    }
 
     let started = std::time::Instant::now();
     while started.elapsed() < std::time::Duration::from_secs(secs) {
@@ -1650,8 +1662,10 @@ pub fn scan_game_from_log(
     let _ = crate::monitor::apply_config(&app, &active);
 
     let note = if addrs.is_empty() {
-        "обход за это время не увидел ни одного адреса. Проверь, что игра работает \
-         и что Game Filter включён: без него игровые порты мимо обхода и идут"
+        "обход за это время не увидел ни одного подходящего адреса. Причин может быть \
+         несколько: игра молчала; Game Filter выключен или стоит не на том протоколе \
+         (матч обычно ходит по UDP); нужные порты не попали в фильтр конфига; winws \
+         упал. Начни с Game Filter в режиме «оба»"
             .to_string()
     } else {
         format!(
@@ -1667,7 +1681,9 @@ pub fn scan_game_from_log(
         let _ = crate::monitor::apply_config(&app, &active);
     }
     Ok(crate::gamescan::ScanResult {
-        running: true,
+        // Именно проверка, а не «раз дошли сюда, значит работает»: winws мог
+        // упасть за эти полминуты, и заявлять обратное мы не вправе.
+        running: crate::winws::is_winws_running(),
         addrs,
         tcp_ports: Vec::new(),
         udp_ports: Vec::new(),

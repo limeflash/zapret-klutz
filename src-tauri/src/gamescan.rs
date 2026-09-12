@@ -298,8 +298,12 @@ pub struct ScanResult {
 /// Копит адреса процессов игры, пока идёт время.
 ///
 /// Опрос, а не подписка: событий о новых соединениях система бесплатно не
-/// отдаёт, а таблица снимается дёшево. Шаг в пару секунд ловит и короткие
-/// соединения — матчмейкинг успевает открыть и закрыть их за это время.
+/// отдаёт, а таблица снимается дёшево.
+///
+/// Чего опрос НЕ умеет, и это стоит знать: соединение, открывшееся и
+/// закрывшееся между двумя тиками, он пропустит. Раньше здесь было написано
+/// ровно наоборот — будто шаг в пару секунд такие соединения ловит. Не
+/// ловит, и уменьшать шаг до бесконечности смысла нет.
 /// Пустой `images` означает «найди сам»: на первом же тике берём процесс,
 /// больше всего похожий на игру, и дальше следим только за ним.
 pub fn scan(
@@ -392,9 +396,10 @@ pub fn describe(running: bool, found: usize, ticks: u32) -> String {
             .into();
     }
     format!(
-        "поймано серверов: {found}. Это те, до которых игра ДОШЛА; если её режут на \
+        "поймано адресов: {found}. Это те, до которых игра ДОШЛА; если её режут на \
          подключении, часть серверов сюда не попадёт — сканируй при работающем обходе. \
-         В список кладём их сети /24, чтобы накрыть и соседние серверы пула"
+         В список кладём их сети /24: игровые серверы обычно стоят в одном блоке, \
+         так что соседи по пулу накроются заодно"
     )
 }
 
@@ -459,9 +464,13 @@ pub fn clear_ips(root: &std::path::Path) -> Result<(), String> {
 // живой машине: из 77 строк UDP удалённый адрес был у двух, и одна из них
 // петля. То есть главный трафик игры этим способом не увидеть в принципе.
 //
-// А winws сидит на WinDivert и видит сами пакеты. С `--debug` он печатает
+// А winws сидит на WinDivert и видит сами пакеты. С `--debug=1` он печатает
 // каждый, который попал под `--wf-*`, — включая тот самый несоединённый UDP.
 // Klutz его вывод и так перехватывает, остаётся разобрать строки.
+//
+// Оговорка, которой тут сперва не было: печатает он их в своём формате, и
+// пока разбор его не понимал, всё это не имело значения. Сбор «работал» и
+// находил единицы адресов из редких строк другого вида.
 
 /// Адрес назначения из строки лога winws, если он там есть.
 ///
@@ -470,27 +479,67 @@ pub fn clear_ips(root: &std::path::Path) -> Result<(), String> {
 ///   `dpi desync src=1.2.3.4:52000 dst=5.6.7.8:27015`
 /// Разбираем обе и не привязываемся к остальному тексту: он меняется от
 /// версии к версии, а адрес — нет.
-pub fn parse_log_addr(line: &str) -> Option<(IpAddr, u16, Proto)> {
-    // Протокол winws пишет в начале строки conntrack: «TCP [..]:.. => ..».
-    // У строки «dpi desync» его нет — там считаем UDP не вправе, поэтому
-    // берём по наличию слова, а при отсутствии не угадываем: такие строки
-    // относим к TCP, и правило для TCP строже, то есть ошибка будет в
-    // сторону «не собрали», а не «собрали лишнее».
-    let upper = line.to_ascii_uppercase();
-    let proto = if upper.contains("UDP") { Proto::Udp } else { Proto::Tcp };
+pub fn parse_log_addr(line: &str) -> Option<LogAddr> {
+    let proto = if line.to_ascii_lowercase().contains("proto=udp") || line.contains("UDP") {
+        Proto::Udp
+    } else {
+        Proto::Tcp
+    };
+
+    // Форма «dpi desync»: адрес с портом прямо в поле.
     if let Some(rest) = line.split("dst=").nth(1) {
-        let token = rest.split_whitespace().next()?;
-        if let Some((ip, port)) = split_addr(token) {
-            return Some((ip, port, proto));
+        if let Some(token) = rest.split_whitespace().next() {
+            if let Some((ip, port)) = split_addr(token) {
+                return Some(LogAddr { ip, port, proto, sport: поле(line, "sport=") });
+            }
         }
     }
+
+    // Основная форма пакета. Собрана у winws из отдельных кусков и
+    // выглядит так:
+    //   IP4: 192.168.1.16 => 104.21.43.64 proto=udp ttl=128 sport=50282 dport=443
+    // Порт тут ОТДЕЛЬНЫМ полем, а не после адреса. Я этого сперва не
+    // учёл: разбор ждал «=> адрес:порт», на этих строках возвращал пусто,
+    // и сбор работал только на редких строках «dpi desync». Отсюда и
+    // выходили единицы адресов вместо десятков.
     if let Some(rest) = line.split("=> ").nth(1) {
-        let token = rest.split_whitespace().next()?;
-        if let Some((ip, port)) = split_addr(token) {
-            return Some((ip, port, proto));
+        if let Some(token) = rest.split_whitespace().next() {
+            // Сначала форма, где порт рядом с адресом: [1.2.3.4]:27015.
+            // Разбираем ИСХОДНЫЙ токен: обрезав скобки заранее, мы
+            let bare = token.trim_matches(|c| c == '[' || c == ']');
+            if let Ok(ip) = bare.parse::<IpAddr>() {
+                if let Some(port) = поле(line, "dport=") {
+                    return Some(LogAddr { ip, port, proto, sport: поле(line, "sport=") });
+                }
+            }
+            // И старая форма conntrack, где порт всё-таки рядом с адресом.
+            if let Some((ip, port)) = split_addr(token) {
+                return Some(LogAddr { ip, port, proto, sport: поле(line, "sport=") });
+            }
         }
     }
     None
+}
+
+/// Адрес из строки лога вместе с тем, что о нём известно.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogAddr {
+    pub ip: IpAddr,
+    pub port: u16,
+    pub proto: Proto,
+    /// Исходящий порт. По нему пакет можно привязать к процессу: локальные
+    /// порты у процесса система показывает даже для несоединённого UDP.
+    pub sport: Option<u16>,
+}
+
+/// Числовое поле вида `имя=1234` из строки лога.
+fn поле(line: &str, name: &str) -> Option<u16> {
+    line.split(name)
+        .nth(1)?
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Копилка адресов, пока идёт сбор из лога. `None` — сбор не идёт, и тогда
@@ -530,9 +579,9 @@ pub fn harvest_len() -> usize {
 pub fn harvest_line(line: &str) {
     let mut g = HARVEST.lock().unwrap_or_else(|e| e.into_inner());
     let Some(set) = g.as_mut() else { return };
-    if let Some((ip, port, proto)) = parse_log_addr(line) {
-        if is_external(&ip) && стоит_собирать(proto, port) {
-            set.insert(ip.to_string());
+    if let Some(a) = parse_log_addr(line) {
+        if is_external(&a.ip) && стоит_собирать(a.proto, a.port) {
+            set.insert(a.ip.to_string());
         }
     }
 }
@@ -938,19 +987,46 @@ mod unit_tests {
     #[test]
     fn адрес_из_строки_лога_winws() {
         // Форма conntrack.
-        let (ip, port, _) = parse_log_addr("UDP [192.168.1.5]:52000 => [162.159.135.232]:27015 : t0=1").unwrap();
+        let a = parse_log_addr("UDP [192.168.1.5]:52000 => [162.159.135.232]:27015 : t0=1").unwrap();
+        let (ip, port) = (a.ip, a.port);
         assert_eq!(ip.to_string(), "162.159.135.232");
         assert_eq!(port, 27015);
 
         // Форма «dpi desync». Она важнее: у неё dst стоит явно, и её мы
         // проверяем первой.
-        let (ip, port, _) = parse_log_addr("dpi desync src=192.168.1.5:52000 dst=104.16.0.1:443").unwrap();
+        let a = parse_log_addr("dpi desync src=192.168.1.5:52000 dst=104.16.0.1:443").unwrap();
+        let (ip, port) = (a.ip, a.port);
         assert_eq!(ip.to_string(), "104.16.0.1");
         assert_eq!(port, 443);
 
         // IPv6 в скобках.
-        let (ip, _, _) = parse_log_addr("TCP [fe80::1]:1 => [2606:4700::1]:443 : x").unwrap();
+        let a = parse_log_addr("TCP [fe80::1]:1 => [2606:4700::1]:443 : x").unwrap();
+        let (ip, _) = (a.ip, a.port);
         assert_eq!(ip.to_string(), "2606:4700::1");
+    }
+
+    #[test]
+    fn настоящая_строка_пакета_winws_разбирается() {
+        // Ровно так winws собирает её из своих кусков: «IP4: %s», «%s => %s»,
+        // «%s proto=%s ttl=%u», «sport=%u dport=%u». Порт стоит ОТДЕЛЬНЫМ
+        // полем, и на этом разбор сперва и спотыкался — а это основная
+        // форма, ради которой всё затевалось.
+        let a = parse_log_addr(
+            "IP4: 192.168.1.16 => 104.21.43.64 proto=udp ttl=128 sport=50282 dport=27015",
+        )
+        .unwrap();
+        assert_eq!(a.ip.to_string(), "104.21.43.64");
+        assert_eq!(a.port, 27015);
+        assert_eq!(a.proto, Proto::Udp);
+        assert_eq!(a.sport, Some(50282), "исходящий порт нужен для привязки к процессу");
+
+        // TCP-вариант с флагами.
+        let a = parse_log_addr(
+            "IP4: 192.168.1.16 => 146.66.155.73 proto=tcp ttl=128 sport=51000 dport=27018 flags=S seq=1 ack_seq=0",
+        )
+        .unwrap();
+        assert_eq!(a.port, 27018);
+        assert_eq!(a.proto, Proto::Tcp);
     }
 
     #[test]
