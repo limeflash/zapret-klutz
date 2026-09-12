@@ -173,6 +173,7 @@
         { label: 'Драйвер WinDivert', ok: true },
         { label: 'winws.exe', ok: true },
         { label: 'Файл hosts', ok: false, fixKey: 'hosts', warn: 'найдены посторонние записи' },
+        { label: 'UDP наружу проходит (голос Discord, QUIC)', ok: true },
       ],
     }),
     fixDiagnostic: noop,

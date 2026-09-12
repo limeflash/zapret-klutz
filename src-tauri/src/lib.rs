@@ -27,6 +27,7 @@ mod tgws;
 mod tlsprobe;
 mod toggles;
 mod tray;
+mod udpprobe;
 mod winws;
 
 use state::AppState;

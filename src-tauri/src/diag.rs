@@ -115,6 +115,22 @@ pub fn run_diagnostics(root: Option<&Path>) -> Vec<DiagRow> {
         !svc_matches(&services, "goodbyedpi|discordfix_zapret|winws1|winws2"),
     ));
 
+    // Всё остальное здесь — про машину, а это единственная строка про сеть.
+    // Она тут потому, что ответ на неё ничего не говорит о стратегии: если
+    // UDP наружу не выпускают, голос Discord не заработает ни с каким
+    // конфигом, и перебирать их — время впустую.
+    let udp = crate::udpprobe::probe_udp(std::time::Duration::from_secs(3));
+    out.push(DiagRow {
+        label: "UDP наружу проходит (голос Discord, QUIC)".into(),
+        ok: udp.verdict != crate::udpprobe::UdpVerdict::Blocked,
+        fix_key: None,
+        // Неизмеренное не выдаём за исправное: строка зелёная, но с оговоркой.
+        warn: match udp.verdict {
+            crate::udpprobe::UdpVerdict::Ok => None,
+            _ => Some(udp.note),
+        },
+    });
+
     out
 }
 
