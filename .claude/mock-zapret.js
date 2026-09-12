@@ -144,6 +144,8 @@
       verdict: 'helps',
       note: 'разрез ClientHello пробивает — стратегии zapret здесь применимы, подбор имеет смысл',
       targets: [{ name: 'Discord Main', host: 'discord.com', verdict: 'helps', note: 'целый режут, разрезанный проходит' }],
+      tls13: 'TLS 1.3 не проходит, а откат на 1.2 проходит — режут именно ClientHello 1.3',
+      response: { verdict: 'blocked', reason: 'запрос проходит, а рукопожатие не завершается ни разу — режут ОТВЕТ', target: 0, control: 2, repeats: 2 },
     }),
     getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
     generateExtraStrategies: noop,

@@ -366,6 +366,12 @@ pub fn run_tests(app: AppHandle, state: State<AppState>, mode: String) -> RunTes
     // Не отменяем — человек попросил прогон, — но говорим прямо.
     let chance = bypass_chance(&state);
     let _ = app.emit("test-log", format!("Предпроверка: {}", chance.note));
+    if let Some(t13) = &chance.tls13 {
+        let _ = app.emit("test-log", format!("Предпроверка: {t13}"));
+    }
+    if let Some(r) = &chance.response {
+        let _ = app.emit("test-log", format!("Предпроверка: {}", r.reason));
+    }
 
     let before = state.persisted.lock().unwrap().active_config.clone();
     let result = run_tests_inner(&app, &run, &root, &mode);
@@ -1300,6 +1306,12 @@ pub struct BypassChance {
     verdict: crate::tlsprobe::FragVerdict,
     note: String,
     targets: Vec<ChanceTarget>,
+    /// Не режут ли ОТВЕТ сервера — проверяется по одной цели.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response: Option<crate::tlsprobe::ResponseResult>,
+    /// Не нацелена ли блокировка именно на TLS 1.3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls13: Option<String>,
 }
 
 /// Отвечает за пару секунд на вопрос, ради которого иначе пришлось бы гнать
@@ -1324,15 +1336,38 @@ fn bypass_chance(state: &State<AppState>) -> BypassChance {
 
     let timeout = std::time::Duration::from_secs(3);
     let mut targets = Vec::new();
+    // Глубокие пробы (ответное направление и версия TLS) стоят по несколько
+    // соединений каждая, поэтому гоняем их по ОДНОЙ цели — первой, до
+    // которой достучались. Вывод от второй тот же, а время втрое.
+    let mut deep: Option<(std::net::IpAddr, u16, String)> = None;
+
     for t in core {
         let Some(ip) = crate::probe::first_ip(&t.host, t.port) else { continue };
-        let Ok(ip) = ip.parse() else { continue };
+        let Ok(ip) = ip.parse::<std::net::IpAddr>() else { continue };
         let r = crate::tlsprobe::probe_fragmentation(ip, t.port, &t.host, timeout);
+        if deep.is_none() {
+            deep = Some((ip, t.port, t.host.clone()));
+        }
         targets.push(ChanceTarget { name: t.name, host: t.host, verdict: r.verdict, note: r.note });
     }
+
+    let (mut response, mut tls13) = (None, None);
+    if let Some((ip, port, host)) = deep {
+        // Про ответное направление говорить осмысленно только там, где
+        // запрос проходит: если режут запрос, до ответа дело не доходит.
+        let (v13, why13) = crate::tlsprobe::probe_tls13_block(ip, port, &host, timeout);
+        if v13 != crate::tlsprobe::Tls13Verdict::Ok {
+            tls13 = Some(why13);
+        }
+        let r = crate::tlsprobe::probe_response_direction(ip, port, &host, 2, timeout);
+        if r.verdict != crate::tlsprobe::RespVerdict::Clear {
+            response = Some(r);
+        }
+    }
+
     let (verdict, note) =
         crate::tlsprobe::aggregate(&targets.iter().map(|t| t.verdict).collect::<Vec<_>>());
-    BypassChance { verdict, note, targets }
+    BypassChance { verdict, note, targets, response, tls13 }
 }
 
 #[tauri::command(async)]

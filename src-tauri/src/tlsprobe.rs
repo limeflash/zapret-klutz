@@ -109,6 +109,18 @@ impl ClientHello {
 /// байта: любая такая строка годится как публичный ключ x25519, а
 /// рукопожатие нам всё равно не доводить.
 pub fn build_client_hello(sni: &str) -> ClientHello {
+    build_client_hello_opts(sni, false)
+}
+
+/// То же, но с возможностью запретить TLS 1.3.
+///
+/// `tls12_only` убирает supported_versions, key_share и psk_key_exchange_modes
+/// — все три расширения существуют только ради 1.3. Без них сервер
+/// договаривается максимум на 1.2, а это и нужно: в 1.2 сертификат едет
+/// ОТКРЫТЫМ ТЕКСТОМ и содержит имя домена, то есть именно там коробка может
+/// резать ОТВЕТ. В 1.3 такого класса блокировки не существует — после
+/// ServerHello всё зашифровано, и резать по имени в сертификате нечего.
+pub fn build_client_hello_opts(sni: &str, tls12_only: bool) -> ClientHello {
     let mut rnd = [0u8; 64];
     if !crate::sys::os_random(&mut rnd) {
         // ГСЧ недоступен — на результат пробы это не влияет, важна лишь
@@ -164,8 +176,10 @@ pub fn build_client_hello(sni: &str) -> ClientHello {
             0x08, 0x06, 0x06, 0x01,
         ],
     );
-    ext(&mut exts, 0x002b, &[0x04, 0x03, 0x04, 0x03, 0x03]); // supported_versions: 1.3, 1.2
-    ext(&mut exts, 0x002d, &[0x01, 0x01]); // psk_key_exchange_modes
+    if !tls12_only {
+        ext(&mut exts, 0x002b, &[0x04, 0x03, 0x04, 0x03, 0x03]); // supported_versions: 1.3, 1.2
+        ext(&mut exts, 0x002d, &[0x01, 0x01]); // psk_key_exchange_modes
+    }
     // ALPN: h2, http/1.1
     ext(
         &mut exts,
@@ -174,13 +188,15 @@ pub fn build_client_hello(sni: &str) -> ClientHello {
             0x00, 0x0c, 0x02, b'h', b'2', 0x08, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1',
         ],
     );
-    // key_share: x25519 со случайным ключом
-    let mut ks = Vec::with_capacity(40);
-    ks.extend_from_slice(&u16b(36)); // длина списка
-    ks.extend_from_slice(&u16b(0x001d)); // x25519
-    ks.extend_from_slice(&u16b(32));
-    ks.extend_from_slice(&rnd[..32]);
-    ext(&mut exts, 0x0033, &ks);
+    if !tls12_only {
+        // key_share: x25519 со случайным ключом
+        let mut ks = Vec::with_capacity(40);
+        ks.extend_from_slice(&u16b(36)); // длина списка
+        ks.extend_from_slice(&u16b(0x001d)); // x25519
+        ks.extend_from_slice(&u16b(32));
+        ks.extend_from_slice(&rnd[..32]);
+        ext(&mut exts, 0x0033, &ks);
+    }
 
     push_len16(&mut body, &exts);
     // Заголовок расширений — два байта длины, они уже перед exts.
@@ -329,6 +345,255 @@ pub fn aggregate(verdicts: &[FragVerdict]) -> (FragVerdict, String) {
     (Inconclusive, "проверить не удалось — до целей не достучались".into())
 }
 
+
+// ──────────────── ответное направление и версия TLS ────────────────
+
+/// Какие сообщения рукопожатия успели прийти от сервера.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct HsSeen {
+    pub server_hello: bool,
+    /// Сертификат пришёл ЦЕЛИКОМ. Именно на нём режут ответ в TLS 1.2.
+    pub certificate: bool,
+    /// ServerHelloDone — сервер досказал свою часть.
+    pub done: bool,
+    pub alert: bool,
+}
+
+/// Разбирает поток TLS-записей и отмечает, что в нём встретилось.
+///
+/// Чистая функция: сокет читает вызывающий. Сообщения рукопожатия могут быть
+/// разрезаны по записям, поэтому сначала склеиваем полезную нагрузку всех
+/// записей типа handshake, а уже потом идём по сообщениям. Флаг ставим
+/// только на СОБРАННОЕ целиком сообщение — иначе «сертификат обрезали на
+/// середине» выглядело бы как «сертификат пришёл», а это ровно тот случай,
+/// который мы и ловим.
+pub fn scan_records(buf: &[u8]) -> HsSeen {
+    let mut seen = HsSeen::default();
+    let mut hs: Vec<u8> = Vec::new();
+
+    let mut i = 0usize;
+    while i + 5 <= buf.len() {
+        let kind = buf[i];
+        let len = u16::from_be_bytes([buf[i + 3], buf[i + 4]]) as usize;
+        let start = i + 5;
+        let Some(end) = start.checked_add(len).filter(|e| *e <= buf.len()) else {
+            break; // запись не доехала целиком
+        };
+        match kind {
+            0x16 => hs.extend_from_slice(&buf[start..end]),
+            0x15 => seen.alert = true,
+            // 0x17 — application_data: в TLS 1.3 всё после ServerHello уже
+            // зашифровано, разбирать там нечего.
+            _ => {}
+        }
+        i = end;
+    }
+
+    let mut j = 0usize;
+    while j + 4 <= hs.len() {
+        let t = hs[j];
+        let l = ((hs[j + 1] as usize) << 16) | ((hs[j + 2] as usize) << 8) | hs[j + 3] as usize;
+        let Some(next) = (j + 4).checked_add(l).filter(|n| *n <= hs.len()) else {
+            break; // сообщение оборвано — целым его не считаем
+        };
+        match t {
+            0x02 => seen.server_hello = true,
+            0x0b => seen.certificate = true,
+            0x0e => seen.done = true,
+            _ => {}
+        }
+        if next == j {
+            break;
+        }
+        j = next;
+    }
+    seen
+}
+
+/// Отправляет ClientHello и читает ответ, пока сервер не досказал своё или
+/// не кончилось время.
+pub fn handshake_probe(
+    ip: IpAddr,
+    port: u16,
+    sni: &str,
+    tls12_only: bool,
+    timeout: Duration,
+) -> (HsSeen, ChOutcome) {
+    let addr = SocketAddr::new(ip, port);
+    let Ok(mut sock) = TcpStream::connect_timeout(&addr, timeout) else {
+        return (HsSeen::default(), ChOutcome::NoConnect);
+    };
+    let _ = sock.set_nodelay(true);
+    let _ = sock.set_write_timeout(Some(timeout));
+    let _ = sock.set_read_timeout(Some(timeout));
+
+    let ch = build_client_hello_opts(sni, tls12_only);
+    if let Err(e) = sock.write_all(&ch.bytes).and_then(|_| sock.flush()) {
+        return (HsSeen::default(), outcome_from_err(&e));
+    }
+
+    let mut acc: Vec<u8> = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 4096];
+    let mut outcome = ChOutcome::Silent;
+    // Потолок на случай болтливого сервера: цепочка сертификатов длиннее
+    // 32 КБ встречается разве что нарочно.
+    while acc.len() < 32 * 1024 {
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                acc.extend_from_slice(&chunk[..n]);
+                outcome = ChOutcome::Answered;
+                let seen = scan_records(&acc);
+                if seen.done || seen.alert {
+                    break;
+                }
+            }
+            Err(e) => {
+                if acc.is_empty() {
+                    outcome = outcome_from_err(&e);
+                }
+                break;
+            }
+        }
+    }
+    (scan_records(&acc), outcome)
+}
+
+// ── 04: режут не запрос, а ответ ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RespVerdict {
+    /// Проверить не удалось. Это НЕ «всё хорошо», это «не измерено».
+    NotApplicable,
+    /// Рукопожатие 1.2 доходит до конца — сертификат не режут.
+    Clear,
+    /// Запрос проходит, а ответ убивают.
+    Blocked,
+    /// Не воспроизводится.
+    Flaky,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseResult {
+    pub verdict: RespVerdict,
+    pub reason: String,
+    /// Сколько рукопожатий из `repeats` дошло до конца.
+    pub target: u32,
+    pub control: u32,
+    pub repeats: u32,
+}
+
+/// Правило вердикта ответного направления — чистое, сеть снаружи.
+///
+/// Оракул тот же, что и везде: сравнение с контролем. Рукопожатие с
+/// нейтральным именем на ТОТ ЖЕ адрес обязано завершаться. Не завершается —
+/// значит сервер не умеет 1.2 или мешает что-то ещё, и вывода мы не делаем.
+pub fn classify_response(target: u32, control: u32, repeats: u32) -> (RespVerdict, String) {
+    if control == 0 {
+        return (
+            RespVerdict::NotApplicable,
+            "контрольное рукопожатие по TLS 1.2 не завершается — сервер его не поддерживает \
+             или мешает что-то ещё; про ответное направление вывода нет"
+                .into(),
+        );
+    }
+    if target == repeats {
+        return (
+            RespVerdict::Clear,
+            "рукопожатие TLS 1.2 доходит до конца — сертификат не режут".into(),
+        );
+    }
+    if target == 0 {
+        return (
+            RespVerdict::Blocked,
+            format!(
+                "запрос проходит, а рукопожатие не завершается ни разу, тогда как с именем {} \
+                 на тот же адрес оно завершается каждый раз. Режут ОТВЕТ — в TLS 1.2 сертификат \
+                 идёт открытым текстом и содержит имя домена",
+                crate::probe::NEUTRAL_SNI
+            ),
+        );
+    }
+    (
+        RespVerdict::Flaky,
+        format!("рукопожатий дошло {target} из {repeats} — не воспроизводится"),
+    )
+}
+
+fn count_completed(ip: IpAddr, port: u16, sni: &str, repeats: u32, timeout: Duration) -> u32 {
+    (0..repeats)
+        .filter(|_| handshake_probe(ip, port, sni, true, timeout).0.done)
+        .count() as u32
+}
+
+/// Не режут ли ОТВЕТ сервера.
+///
+/// Зовётся только там, где запрос уже признан проходящим: если режут запрос,
+/// про ответ говорить рано.
+pub fn probe_response_direction(
+    ip: IpAddr,
+    port: u16,
+    sni: &str,
+    repeats: u32,
+    timeout: Duration,
+) -> ResponseResult {
+    let repeats = repeats.max(1);
+    let target = count_completed(ip, port, sni, repeats, timeout);
+    // Контроль ОБЯЗАН быть другим именем на том же адресе.
+    let control = count_completed(ip, port, crate::probe::NEUTRAL_SNI, repeats, timeout);
+    let (verdict, reason) = classify_response(target, control, repeats);
+    ResponseResult { verdict, reason, target, control, repeats }
+}
+
+// ── 05: блок, нацеленный на TLS 1.3 ──
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tls13Verdict {
+    /// 1.3 проходит — ничего особенного.
+    Ok,
+    /// 1.3 не проходит, а 1.2 проходит: коробка смотрит именно в
+    /// ClientHello 1.3 (ECH/ESNI).
+    Blocked,
+    /// Не прошли обе версии — дело не в версии.
+    NotApplicable,
+}
+
+pub fn classify_tls13(v13: bool, v12: bool) -> (Tls13Verdict, String) {
+    match (v13, v12) {
+        (true, _) => (Tls13Verdict::Ok, "TLS 1.3 проходит".into()),
+        (false, true) => (
+            Tls13Verdict::Blocked,
+            "TLS 1.3 не проходит, а откат на 1.2 проходит — режут именно ClientHello 1.3. \
+             Браузер по умолчанию говорит на 1.3, поэтому страница у человека не открывается, \
+             хотя проверка, согласившаяся на 1.2, показала бы «работает»"
+                .into(),
+        ),
+        (false, false) => (
+            Tls13Verdict::NotApplicable,
+            "не прошли ни 1.3, ни 1.2 — дело не в версии".into(),
+        ),
+    }
+}
+
+/// Сравнивает 1.3 и 1.2 к одному адресу.
+pub fn probe_tls13_block(
+    ip: IpAddr,
+    port: u16,
+    sni: &str,
+    timeout: Duration,
+) -> (Tls13Verdict, String) {
+    let v13 = handshake_probe(ip, port, sni, false, timeout).0.server_hello;
+    // Лишний заход платим, только когда 1.3 не прошёл.
+    let v12 = if v13 {
+        true
+    } else {
+        handshake_probe(ip, port, sni, true, timeout).0.server_hello
+    };
+    classify_tls13(v13, v12)
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -445,6 +710,110 @@ mod unit_tests {
         assert_eq!(a.sni_offset, b.sni_offset, "а смещение имени — нет");
     }
 
+    /// Запись TLS: тип, версия, длина, тело.
+    fn запись(kind: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![kind, 0x03, 0x03];
+        v.extend_from_slice(&u16b(body.len()));
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// Сообщение рукопожатия: тип, длина в трёх байтах, тело.
+    fn сообщение(t: u8, len: usize) -> Vec<u8> {
+        let mut v = vec![t, (len >> 16) as u8, (len >> 8) as u8, len as u8];
+        v.extend(std::iter::repeat_n(0xAB, len));
+        v
+    }
+
+    #[test]
+    fn полное_рукопожатие_разбирается() {
+        let mut hs = сообщение(0x02, 70); // ServerHello
+        hs.extend(сообщение(0x0b, 900)); // Certificate
+        hs.extend(сообщение(0x0e, 0)); // ServerHelloDone
+        let seen = scan_records(&запись(0x16, &hs));
+        assert!(seen.server_hello && seen.certificate && seen.done, "{seen:?}");
+        assert!(!seen.alert);
+    }
+
+    #[test]
+    fn обрезанный_сертификат_не_считается_пришедшим() {
+        // Ровно тот случай, ради которого всё и затевалось: ServerHello
+        // вернулся, а сертификат обрубили на середине.
+        let mut hs = сообщение(0x02, 70);
+        let cert = сообщение(0x0b, 900);
+        hs.extend_from_slice(&cert[..400]); // обрыв внутри сертификата
+        let seen = scan_records(&запись(0x16, &hs));
+        assert!(seen.server_hello, "ServerHello пришёл целиком");
+        assert!(!seen.certificate, "сертификат неполон — считать пришедшим нельзя");
+        assert!(!seen.done);
+    }
+
+    #[test]
+    fn сообщение_разрезанное_по_записям_собирается() {
+        // Сообщения рукопожатия не обязаны укладываться в одну запись.
+        let hs = сообщение(0x0b, 600);
+        let mut поток = запись(0x16, &hs[..200]);
+        поток.extend(запись(0x16, &hs[200..]));
+        let seen = scan_records(&поток);
+        assert!(seen.certificate, "склейка записей не сработала");
+    }
+
+    #[test]
+    fn alert_замечается() {
+        let seen = scan_records(&запись(0x15, &[0x02, 0x28]));
+        assert!(seen.alert);
+        assert!(!seen.server_hello);
+    }
+
+    #[test]
+    fn мусор_и_обрывки_не_роняют_разбор() {
+        for buf in [
+            vec![],
+            vec![0x16],
+            vec![0x16, 0x03, 0x03, 0xff, 0xff], // длина больше, чем данных
+            vec![0x16, 0x03, 0x03, 0x00, 0x04, 0x0b, 0xff, 0xff, 0xff], // длина сообщения врёт
+            vec![0xAB; 64],
+        ] {
+            let _ = scan_records(&buf);
+        }
+    }
+
+    #[test]
+    fn вердикт_ответного_направления() {
+        use RespVerdict::*;
+        assert_eq!(classify_response(3, 3, 3).0, Clear);
+        assert_eq!(classify_response(0, 3, 3).0, Blocked);
+        assert_eq!(classify_response(1, 3, 3).0, Flaky);
+        // Контроль молчит — вывода нет, и это НЕ «всё хорошо».
+        assert_eq!(classify_response(0, 0, 3).0, NotApplicable);
+        assert_eq!(classify_response(3, 0, 3).0, NotApplicable);
+    }
+
+    #[test]
+    fn вердикт_по_версии_tls() {
+        use Tls13Verdict::*;
+        assert_eq!(classify_tls13(true, false).0, Ok);
+        assert_eq!(classify_tls13(true, true).0, Ok);
+        assert_eq!(classify_tls13(false, true).0, Blocked);
+        assert_eq!(classify_tls13(false, false).0, NotApplicable);
+    }
+
+    #[test]
+    fn запрет_tls13_убирает_его_расширения() {
+        let v13 = build_client_hello_opts("discord.com", false).bytes;
+        let v12 = build_client_hello_opts("discord.com", true).bytes;
+        // 0x002b supported_versions и 0x0033 key_share существуют только ради 1.3.
+        let есть = |b: &[u8], ext: [u8; 2]| b.windows(2).any(|w| w == ext);
+        assert!(есть(&v13, [0x00, 0x2b]), "в 1.3-варианте supported_versions обязан быть");
+        assert!(v12.len() < v13.len(), "1.2-вариант должен быть короче");
+        // Имя на месте в обоих.
+        let ch12 = build_client_hello_opts("discord.com", true);
+        assert_eq!(
+            &ch12.bytes[ch12.sni_offset..ch12.sni_offset + ch12.sni_len],
+            b"discord.com"
+        );
+    }
+
     #[test]
     fn расширение_имени_объявлено_первым() {
         // Порядок сам по себе не критичен, но имя ближе к началу означает,
@@ -453,4 +822,5 @@ mod unit_tests {
         assert!(ch.sni_offset < 120, "имя слишком глубоко: {}", ch.sni_offset);
     }
 }
+
 
