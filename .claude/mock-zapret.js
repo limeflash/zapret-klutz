@@ -48,6 +48,8 @@
     activeConfig: 'general (ALT).bat',
     running: true,
     installedAsService: false,
+    // Служба zapret, поставленная не из Klutz (см. get_state в commands.rs).
+    serviceExists: false,
     canInstallService: true,
     startedAt: Date.now() - 12 * 60 * 1000,
     monitor: { checkedAt: Date.now(), targets: allTargets().map(pingResult) },

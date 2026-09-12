@@ -55,7 +55,8 @@ function setMaximized(on) {
   $('winMaxBtn').title = on ? 'Свернуть в окно' : 'Развернуть';
 }
 window.zapret.onWindowMaximized(setMaximized);
-window.zapret.windowIsMaximized().then((r) => setMaximized(r.maximized));
+// Команда отдаёт голый bool, а не { maximized }.
+window.zapret.windowIsMaximized().then((r) => setMaximized(r === true || !!(r && r.maximized)));
 
 // ─────────── Тосты / подтверждение ───────────
 
@@ -295,7 +296,15 @@ function renderStatusbar() {
 
   $('statusText').textContent = running ? 'Работает' : 'Остановлен';
   $('sbarSep1').classList.toggle('hidden', !running);
-  $('sbarName').textContent = running ? displayName(currentState.activeConfig) : '';
+  // winws.exe может работать и без нашей стратегии — службой «zapret»,
+  // поставленной не из Klutz. Раньше строка оставалась пустой или «—».
+  $('sbarName').textContent = !running
+    ? ''
+    : currentState.activeConfig
+    ? displayName(currentState.activeConfig)
+    : currentState.serviceExists
+    ? 'служба zapret'
+    : '';
   $('sbarUptime').textContent = running ? formatUptime(currentState.startedAt) : '';
 }
 
@@ -517,8 +526,15 @@ async function refreshState() {
 
 async function stopActive() {
   pickFailed = false;
-  if (currentState.installedAsService) {
-    const ok = await showConfirm('Стратегия установлена как служба. Снять службу и остановить?');
+  if (currentState.installedAsService || currentState.serviceExists) {
+    // Чужая служба тоже сюда: taskkill по её winws.exe оставлял службу
+    // «завершённой неожиданно», а при следующей загрузке она поднималась
+    // снова — обход «не выключался».
+    const ok = await showConfirm(
+      currentState.installedAsService
+        ? 'Стратегия установлена как служба. Снять службу и остановить?'
+        : 'Обход работает службой Windows «zapret», установленной не из Klutz. Снять службу и остановить?'
+    );
     if (!ok) return;
     await window.zapret.removeService();
     loadServiceStatus();
@@ -545,7 +561,31 @@ $('heroFailedStopBtn').onclick = stopActive;
 
 // silent: skip the generic success toast — used by the auto-pick flow, which
 // shows a more specific one after actually checking whether it worked.
+// Служба «zapret», поставленная не из Klutz (через service.bat самого
+// zapret), держит свой winws.exe: прямой запуск упирается в неё, а скрипт
+// тестов при установленной службе отказывается работать вовсе. Обычная
+// картина на первом запуске у тех, кто раньше пользовался zapret вручную:
+// «Подобрать и включить» кончалось невнятной ошибкой. Предлагаем снять её
+// на месте, а не отправлять искать, где это делается.
+async function ensureNoForeignService() {
+  if (!currentState.serviceExists || currentState.installedAsService) return true;
+  const ok = await showConfirm(
+    'На компьютере уже стоит служба Windows «zapret», установленная не из Klutz. ' +
+      'Пока она работает, Klutz не может запускать обход сам. Снять службу и продолжить?'
+  );
+  if (!ok) return false;
+  const res = await window.zapret.removeService();
+  if (res && res.ok === false) {
+    showToast(res.error || 'Не удалось снять службу', 'error');
+    return false;
+  }
+  await refreshState();
+  loadServiceStatus();
+  return true;
+}
+
 async function applyConfig(name, asService, silent) {
+  if (!(await ensureNoForeignService())) return false;
   const res = asService ? await window.zapret.installService(name) : await window.zapret.runConfig(name);
   if (!res.ok) {
     showToast(res.error || 'Не удалось запустить', 'error');
@@ -1762,6 +1802,7 @@ async function runAllTests(opts = {}) {
     showToast('Тесты уже идут', 'warn');
     return;
   }
+  if (!(await ensureNoForeignService())) return;
   testing = true;
   pickFailed = false;
   if (opts.btn) opts.btn.disabled = true;
@@ -3276,7 +3317,12 @@ async function loadFromPath(p) {
   await afterReleaseLoaded();
 }
 
+// Размер архива из ответа GitHub — чтобы полоса загрузки показывала
+// мегабайты, а не только проценты.
+let latestReleaseSize = 0;
+
 window.zapret.getLatestReleaseInfo().then((info) => {
+  latestReleaseSize = info.ok ? info.size || 0 : 0;
   if (!info.ok) {
     $('onboardVersionInfo').textContent = 'Не удалось проверить версию на GitHub — выбери вручную.';
     $('downloadLatestBtn').classList.add('hidden');
@@ -3296,12 +3342,20 @@ $('downloadLatestBtn').onclick = async () => {
   $('downloadProgressFill').style.width = '0%';
   $('downloadProgressText').textContent = 'Скачиваю…';
 
-  const off = window.zapret.onDownloadProgress(({ received, total }) => {
-    if (!total) return;
-    const pct = Math.round((received / total) * 100);
+  // Бэкенд шлёт голый процент (curl --progress-bar даёт только его), а не
+  // { received, total }: деструктуризация числа давала undefined, и полоса
+  // стояла на нуле с надписью «Скачиваю…» до самого конца.
+  const off = window.zapret.onDownloadProgress((p) => {
+    const pct = typeof p === 'number' ? p : p && p.total ? Math.round((p.received / p.total) * 100) : NaN;
+    if (Number.isNaN(pct)) return;
     $('downloadProgressFill').style.width = pct + '%';
+    const mb = (b) => (b / 1024 / 1024).toFixed(1);
     $('downloadProgressText').textContent =
-      `${pct}% · ${(received / 1024 / 1024).toFixed(1)} из ${(total / 1024 / 1024).toFixed(1)} МБ`;
+      pct >= 100
+        ? 'Скачано, распаковываю…'
+        : latestReleaseSize
+        ? `${pct}% · ${mb((latestReleaseSize * pct) / 100)} из ${mb(latestReleaseSize)} МБ`
+        : `${pct}%`;
   });
 
   const res = await window.zapret.downloadLatestRelease();

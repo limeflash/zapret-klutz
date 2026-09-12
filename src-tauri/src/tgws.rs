@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -132,15 +132,36 @@ pub fn ensure_settings(app: &AppHandle) {
     }
 }
 
-fn exe_path(app: &AppHandle) -> PathBuf {
-    // В собранном приложении лежит рядом как ресурс, в dev — в bin/.
+/// Где лежит TgWsProxyHeadless.exe.
+///
+/// В tauri.conf.json он объявлен ресурсом `bin/TgWsProxyHeadless.exe`, а
+/// Tauri сохраняет структуру каталогов: установщик кладёт его в
+/// `<папка приложения>\bin\`, а не рядом с klutz.exe. Раньше искали рядом,
+/// а запасной путь `bin/…` был относительным — от ТЕКУЩЕГО каталога. Из
+/// ярлыка это совпадало (у ярлыка задан рабочий каталог), а при автозапуске
+/// через Планировщик, из «Выполнить» и при запуске сразу из установщика
+/// текущий каталог другой — и прокси «не находился», окно писало
+/// «недоступен». Теперь отталкиваемся от самого klutz.exe.
+pub fn exe_path(app: &AppHandle) -> PathBuf {
+    const NAME: &str = "TgWsProxyHeadless.exe";
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(dir) = app.path().resource_dir() {
-        let p = dir.join("TgWsProxyHeadless.exe");
-        if p.exists() {
-            return p;
-        }
+        candidates.push(dir.join("bin").join(NAME));
+        candidates.push(dir.join(NAME));
     }
-    PathBuf::from("bin/TgWsProxyHeadless.exe")
+    if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
+        candidates.push(dir.join("bin").join(NAME));
+        candidates.push(dir.join(NAME));
+        // `cargo tauri dev`: бинарник в src-tauri/target/{debug,release}/,
+        // а ресурс — в src-tauri/bin/.
+        candidates.push(dir.join("..").join("..").join("bin").join(NAME));
+    }
+    candidates.push(PathBuf::from("bin").join(NAME));
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| candidates[0].clone())
 }
 
 /// «dd» перед секретом помечает padded-intermediate («fake TLS») режим —
@@ -225,7 +246,10 @@ pub fn start(app: &AppHandle) -> Result<(), String> {
 
     let exe = exe_path(app);
     if !exe.exists() {
-        return Err("TgWsProxyHeadless.exe не найден рядом с приложением.".into());
+        return Err(format!(
+            "TgWsProxyHeadless.exe не найден (искали {}). Переустанови Klutz.",
+            exe.display()
+        ));
     }
 
     let mut args: Vec<String> = vec![
