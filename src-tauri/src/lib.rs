@@ -23,6 +23,7 @@ mod sys;
 mod targets;
 mod tests;
 mod tgws;
+mod tlsprobe;
 mod toggles;
 mod tray;
 mod winws;
@@ -165,6 +166,7 @@ pub fn run() {
             commands::get_versions,
             commands::check_component_updates,
             commands::check_klutz_update,
+            commands::check_bypass_chance,
             commands::get_extra_strategies,
             commands::generate_extra_strategies,
             commands::remove_extra_strategies,

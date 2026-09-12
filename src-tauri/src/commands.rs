@@ -361,6 +361,12 @@ pub fn run_tests(app: AppHandle, state: State<AppState>, mode: String) -> RunTes
 
     // Скрипт сам поднимает и гасит winws под каждый конфиг, так что к концу
     // прогона работает что угодно. Запоминаем, что было до.
+    // Пара секунд до прогона стоят того: если разрез ClientHello тут не
+    // пробивает, перебор двух десятков конфигов, скорее всего, впустую.
+    // Не отменяем — человек попросил прогон, — но говорим прямо.
+    let chance = bypass_chance(&state);
+    let _ = app.emit("test-log", format!("Предпроверка: {}", chance.note));
+
     let before = state.persisted.lock().unwrap().active_config.clone();
     let result = run_tests_inner(&app, &run, &root, &mode);
     restore_after_tests(&app, before);
@@ -1277,6 +1283,61 @@ pub fn save_custom_lists(state: State<AppState>, include: String, exclude: Strin
         },
         None => err("Сначала загрузи релиз zapret."),
     }
+}
+
+// ─────────── Поможет ли обход ───────────
+
+#[derive(Debug, Serialize)]
+pub struct ChanceTarget {
+    name: String,
+    host: String,
+    verdict: crate::tlsprobe::FragVerdict,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BypassChance {
+    verdict: crate::tlsprobe::FragVerdict,
+    note: String,
+    targets: Vec<ChanceTarget>,
+}
+
+/// Отвечает за пару секунд на вопрос, ради которого иначе пришлось бы гнать
+/// весь прогон: пробивает ли разрез ClientHello на этой сети.
+///
+/// Берём только ключевые цели и не больше трёх — каждая стоит одного-двух
+/// соединений, а вывод от четвёртой уже не меняется.
+fn bypass_chance(state: &State<AppState>) -> BypassChance {
+    let list = {
+        let p = state.persisted.lock().unwrap();
+        p.game_targets.clone().unwrap_or_else(crate::targets::default_targets)
+    };
+    let core: Vec<_> = list
+        .into_iter()
+        .filter(|t| t.port == 443)
+        .filter(|t| {
+            let n = t.name.to_lowercase();
+            n.starts_with("discord") || n.starts_with("youtube")
+        })
+        .take(3)
+        .collect();
+
+    let timeout = std::time::Duration::from_secs(3);
+    let mut targets = Vec::new();
+    for t in core {
+        let Some(ip) = crate::probe::first_ip(&t.host, t.port) else { continue };
+        let Ok(ip) = ip.parse() else { continue };
+        let r = crate::tlsprobe::probe_fragmentation(ip, t.port, &t.host, timeout);
+        targets.push(ChanceTarget { name: t.name, host: t.host, verdict: r.verdict, note: r.note });
+    }
+    let (verdict, note) =
+        crate::tlsprobe::aggregate(&targets.iter().map(|t| t.verdict).collect::<Vec<_>>());
+    BypassChance { verdict, note, targets }
+}
+
+#[tauri::command(async)]
+pub fn check_bypass_chance(state: State<AppState>) -> BypassChance {
+    bypass_chance(&state)
 }
 
 // ─────────── Дополнительные стратегии ───────────

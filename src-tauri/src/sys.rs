@@ -8,6 +8,24 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Системный ГСЧ. `RandomState` для этого не годился: std засевает ключи
+/// SipHash из ОС ОДИН раз на поток, а дальше просто инкрементирует счётчик —
+/// два блока подряд получали связанные ключи, и вся энтропия сводилась к
+/// одному посеву плюс метке времени, а не к 128 битам, как выглядело.
+#[cfg(target_os = "windows")]
+pub fn os_random(buf: &mut [u8]) -> bool {
+    use windows_sys::Win32::Security::Cryptography::ProcessPrng;
+    unsafe { ProcessPrng(buf.as_mut_ptr(), buf.len()) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn os_random(buf: &mut [u8]) -> bool {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .is_ok()
+}
+
 /// Абсолютный путь к системной утилите.
 ///
 /// `Command::new("cmd.exe")` ищет файл в том числе в ТЕКУЩЕМ каталоге, а

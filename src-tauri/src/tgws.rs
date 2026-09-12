@@ -58,28 +58,10 @@ impl Default for TgSettings {
     }
 }
 
-/// Системный ГСЧ. `RandomState` для этого не годился: std засевает ключи
-/// SipHash из ОС ОДИН раз на поток, а дальше просто инкрементирует счётчик —
-/// два блока подряд получали связанные ключи, и вся энтропия сводилась к
-/// одному посеву плюс метке времени, а не к 128 битам, как выглядело.
-#[cfg(target_os = "windows")]
-fn os_random(buf: &mut [u8]) -> bool {
-    use windows_sys::Win32::Security::Cryptography::ProcessPrng;
-    unsafe { ProcessPrng(buf.as_mut_ptr(), buf.len()) != 0 }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn os_random(buf: &mut [u8]) -> bool {
-    use std::io::Read;
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(buf))
-        .is_ok()
-}
-
 /// 16 байт hex — формат, который ждёт клиент Telegram.
 pub fn random_secret() -> String {
     let mut bytes = [0u8; 16];
-    if !os_random(&mut bytes) {
+    if !sys::os_random(&mut bytes) {
         // ГСЧ ОС не отвечает — случай почти невозможный, но пустой секрет
         // хуже слабого: добираем тем, что есть, и не роняем приложение.
         use std::collections::hash_map::RandomState;

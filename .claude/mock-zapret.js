@@ -140,6 +140,11 @@
     cycleIpsetMode: noop,
     setAutoUpdate: noop,
 
+    checkBypassChance: async () => ({
+      verdict: 'helps',
+      note: 'разрез ClientHello пробивает — стратегии zapret здесь применимы, подбор имеет смысл',
+      targets: [{ name: 'Discord Main', host: 'discord.com', verdict: 'helps', note: 'целый режут, разрезанный проходит' }],
+    }),
     getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
     generateExtraStrategies: noop,
     removeExtraStrategies: noop,

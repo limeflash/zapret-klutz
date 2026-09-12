@@ -84,6 +84,7 @@
     setGameFilter: (mode) => invoke('set_game_filter', { mode }),
     cycleIpsetMode: () => invoke('cycle_ipset_mode'),
     setAutoUpdate: (enabled) => invoke('set_auto_update', { enabled }),
+    checkBypassChance: () => invoke('check_bypass_chance'),
     getExtraStrategies: () => invoke('get_extra_strategies'),
     generateExtraStrategies: (template) => invoke('generate_extra_strategies', { template: template || null }),
     removeExtraStrategies: () => invoke('remove_extra_strategies'),
