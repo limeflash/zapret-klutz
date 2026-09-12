@@ -63,13 +63,11 @@ tg-ws-proxy скриптом `tools/tgwsproxy-build/build.ps1`.
 
 Semver, история — в [CHANGELOG.md](CHANGELOG.md). Каждый выпуск помечен тегом `vX.Y.Z`.
 
-## Участники
+## Команда Klutz
 
-- **[limeflash](https://github.com/limeflash)** — разбор аудита 1.1.0 и правки по
-  нему: контракт Rust↔JS, замок прогона тестов, мониторинг, жизненный цикл
-  процессов, валидация, первые юнит-тесты.
+- **[limeflash](https://github.com/limeflash)**
 - **[aleuuu](https://github.com/aleuuu)**
-- **[vbu00](https://github.com/vbu00)** — сам Klutz.
+- **[vbu00](https://github.com/vbu00)**
 
 ## Благодарности
 
