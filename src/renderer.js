@@ -27,7 +27,6 @@ let testing = false;
 // Автоподбор отработал, но связь после него так и не появилась — Главная
 // показывает это отдельным состоянием, пока пользователь что-то не поменяет.
 let pickFailed = false;
-let searchQuery = '';
 let groupFilter = null;
 
 // ─────────── Тема ───────────
@@ -135,14 +134,17 @@ function prettyName(name) {
   return base;
 }
 
+// Семейства как в макете: базовый и все ALT — это один набор («Базовые»),
+// остальные собираются по префиксу. Раньше ALT жили отдельной группой из
+// тринадцати строк, а FAKE TLS AUTO и FAKE TLS AUTO ALT расходились по
+// разным семействам.
 function deriveGroup(name) {
-  const base = bareName(name);
-  const m = base.match(/^general\s*\((.+)\)$/i);
-  if (!m) return 'Базовый';
-  const content = m[1].trim();
-  if (/^ALT\d*$/i.test(content)) return 'ALT-варианты';
-  const stripped = content.replace(/\s*ALT\d*$/i, '').trim();
-  return stripped || content;
+  const p = prettyName(name);
+  if (p === 'Базовый' || /^ALT\d*$/i.test(p)) return 'Базовые';
+  if (/^FAKE TLS/i.test(p)) return 'FAKE TLS';
+  if (/^SIMPLE FAKE/i.test(p)) return 'SIMPLE FAKE';
+  if (/^MGTS/i.test(p)) return 'MGTS';
+  return p;
 }
 
 function formatUptime(startedAt) {
@@ -823,10 +825,7 @@ $('homeAutoSwitchToggle').onclick = async () => {
 
 const configListEl = $('configList');
 
-$('configSearch').oninput = (e) => {
-  searchQuery = e.target.value;
-  renderConfigList();
-};
+// Поля поиска по конфигам больше нет — отбор делают чипы семейств.
 
 function closeMenus() {
   document.querySelectorAll('.menu').forEach((m) => m.remove());
@@ -935,13 +934,7 @@ function renderConfigList() {
 
   renderGroupChips();
 
-  const q = searchQuery.trim().toLowerCase();
-  const filtered = currentState.configs.filter((n) => prettyName(n).toLowerCase().includes(q));
-
-  if (!filtered.length) {
-    configListEl.innerHTML = '<div class="no-results">Ничего не найдено</div>';
-    return;
-  }
+  const filtered = currentState.configs;
 
   const groups = new Map();
   for (const name of filtered) {
@@ -973,31 +966,34 @@ function renderConfigList() {
         const row = document.createElement('div');
         row.className = 'cfg-row' + (isActive ? ' active' : '');
 
-        const tag = isActive
-          ? currentState.installedAsService
-            ? 'служба Windows'
-            : 'запущен разово'
-          : 'не активен';
+        // Плашку «не активен» убрали: ею была подписана каждая строка, кроме
+        // одной, — шум. У запущенной строка и так зелёная, а вот способ
+        // запуска (служба или разово) нигде больше не виден, его оставляем.
+        const runTag = isActive
+          ? `<span class="cfg-tag on">${currentState.installedAsService ? 'служба Windows' : 'запущен разово'}</span>`
+          : '';
 
         const testedRow = lastResultsCache?.rows.find((r) => r.config === name);
-        const verdictBadge = testedRow
+        const verdict = testedRow
           ? (() => {
               const score = verdictFor(testedRow, lastResultsCache.mode).score;
               return `<span class="cfg-tag" style="color:${verdictColor(score)}" title="Доля проверенных целей, которые ответили">${Math.round(score * 100)}%</span>`;
             })()
           : '';
 
+        const btnLabel = isActive ? 'Активен' : currentState.running ? 'Переключить' : 'Включить';
+
         row.innerHTML = `
           <div class="cfg-main">
             <div class="cfg-title-row">
               <span class="cfg-name">${esc(displayName(name))}</span>
-              <span class="cfg-tag${isActive ? ' on' : ''}">${tag}</span>
-              ${verdictBadge}
+              ${verdict}
+              ${runTag}
             </div>
             <div class="cfg-desc">${esc(name)}</div>
           </div>
           <div class="cfg-actions">
-            <button class="cfg-btn${isActive ? ' on' : ''}" ${isActive ? 'disabled' : ''}>${isActive ? 'Активен' : 'Применить'}</button>
+            <button class="cfg-btn${isActive ? ' on' : ''}" ${isActive ? 'disabled' : ''}>${btnLabel}</button>
             <button class="cfg-more" title="Ещё">⋯</button>
           </div>`;
 
@@ -1039,7 +1035,9 @@ function renderGroupChips() {
     const g = deriveGroup(name);
     counts.set(g, (counts.get(g) || 0) + 1);
   }
-  const chips = [{ label: 'Все', value: null }, ...[...counts.entries()].map(([g, n]) => ({ label: `${g} · ${n}`, value: g }))];
+  // Без «· N»: количество и так стоит в заголовке каждой группы ниже, а в
+  // чипе оно делало ряд длинным и пёстрым.
+  const chips = [{ label: 'Все', value: null }, ...[...counts.keys()].map((g) => ({ label: g, value: g }))];
   $('groupChips').innerHTML = chips
     .map((c) => `<div class="group-chip${c.value === groupFilter ? ' active' : ''}" data-g="${esc(c.value || '')}">${esc(c.label)}</div>`)
     .join('');
@@ -1300,36 +1298,73 @@ function renderCustomAddressList() {
 // ─────────── Командная палитра «добавить адрес» (Ctrl+K) ───────────
 
 const CATALOG = [
-  { g: 'Игры', name: 'Rocket League', host: 'api.rlpp.psynet.gg', port: 443 },
-  { g: 'Игры', name: 'Fortnite', host: 'fortnite-public-service-prod11.ol.epicgames.com', port: 443 },
-  { g: 'Игры', name: 'Valorant', host: 'glz-ru-1.ru.a.pvp.net', port: 443 },
-  { g: 'Игры', name: 'League of Legends', host: 'euw.api.riotgames.com', port: 443 },
-  { g: 'Игры', name: 'Apex Legends', host: 'r5-crossplay.r5prod.stryder.respawn.com', port: 443 },
-  { g: 'Игры', name: 'Roblox', host: 'apis.roblox.com', port: 443 },
-  { g: 'Игры', name: 'Minecraft', host: 'sessionserver.mojang.com', port: 443 },
-  { g: 'Игры', name: 'Genshin Impact', host: 'sdk-os-static.hoyoverse.com', port: 443 },
-  { g: 'Игры', name: 'Overwatch 2', host: 'eu.actual.battle.net', port: 1119 },
-  { g: 'Игры', name: 'Counter-Strike 2', host: 'cm.steampowered.com', port: 27017 },
-  { g: 'Игры', name: 'Dota 2', host: 'api.steampowered.com', port: 443 },
-  { g: 'Игры', name: 'Warframe', host: 'api.warframe.com', port: 443 },
-  { g: 'Игры', name: 'Destiny 2', host: 'www.bungie.net', port: 443 },
-  { g: 'Игры', name: 'War Thunder', host: 'login.gaijin.net', port: 443 },
-  { g: 'Платформы', name: 'Steam', host: 'api.steampowered.com', port: 443 },
-  { g: 'Платформы', name: 'Epic Online', host: 'api.epicgames.dev', port: 443 },
-  { g: 'Платформы', name: 'Riot', host: 'auth.riotgames.com', port: 443 },
-  { g: 'Платформы', name: 'Battle.net', host: 'us.actual.battle.net', port: 1119 },
-  { g: 'Платформы', name: 'Xbox Live', host: 'title.mgt.xboxlive.com', port: 443 },
-  { g: 'Платформы', name: 'PlayStation Network', host: 'auth.api.sonyentertainmentnetwork.com', port: 443 },
-  { g: 'Платформы', name: 'EA App', host: 'accounts.ea.com', port: 443 },
-  { g: 'Платформы', name: 'Ubisoft Connect', host: 'public-ubiservices.ubi.com', port: 443 },
-  { g: 'Сервисы', name: 'Twitch', host: 'gql.twitch.tv', port: 443 },
-  { g: 'Сервисы', name: 'Instagram', host: 'i.instagram.com', port: 443 },
-  { g: 'Сервисы', name: 'Spotify', host: 'api.spotify.com', port: 443 },
-  { g: 'Сервисы', name: 'SoundCloud', host: 'api-v2.soundcloud.com', port: 443 },
-  { g: 'Сервисы', name: 'Cloudflare 1.1.1.1', host: 'one.one.one.one', port: 443 },
-  { g: 'Сервисы', name: 'GitHub', host: 'api.github.com', port: 443 },
-  { g: 'Сервисы', name: 'ChatGPT', host: 'chatgpt.com', port: 443 },
-  { g: 'Сервисы', name: 'Notion', host: 'www.notion.so', port: 443 },
+  // Хост — это то, что реально проверяется на связь, поэтому здесь стоят
+  // рабочие адреса сервисов, а не сайты-витрины: витрина может открываться
+  // и тогда, когда игра не заходит. `a` — синонимы для поиска: как сервис
+  // называют вслух и по-русски.
+  { g: 'Игры', name: 'Counter-Strike 2', host: 'cm.steampowered.com', port: 27017, a: 'cs2 кс контра ксго csgo' },
+  { g: 'Игры', name: 'Dota 2', host: 'api.steampowered.com', port: 443, a: 'дота dota' },
+  { g: 'Игры', name: 'Valorant', host: 'glz-ru-1.ru.a.pvp.net', port: 443, a: 'валорант вало' },
+  { g: 'Игры', name: 'League of Legends', host: 'euw.api.riotgames.com', port: 443, a: 'лол lol лига' },
+  { g: 'Игры', name: 'Fortnite', host: 'fortnite-public-service-prod11.ol.epicgames.com', port: 443, a: 'фортнайт фн' },
+  { g: 'Игры', name: 'Apex Legends', host: 'r5-crossplay.r5prod.stryder.respawn.com', port: 443, a: 'апекс' },
+  { g: 'Игры', name: 'Overwatch 2', host: 'eu.actual.battle.net', port: 1119, a: 'овервотч ow' },
+  { g: 'Игры', name: 'Rocket League', host: 'api.rlpp.psynet.gg', port: 443, a: 'ракетлига рл' },
+  { g: 'Игры', name: 'Roblox', host: 'apis.roblox.com', port: 443, a: 'роблокс' },
+  { g: 'Игры', name: 'Minecraft', host: 'sessionserver.mojang.com', port: 443, a: 'майнкрафт майн mojang' },
+  { g: 'Игры', name: 'Genshin Impact', host: 'sdk-os-static.hoyoverse.com', port: 443, a: 'геншин хойо hoyoverse' },
+  { g: 'Игры', name: 'Honkai: Star Rail', host: 'api-os-takumi.hoyoverse.com', port: 443, a: 'хонкай хср hsr' },
+  { g: 'Игры', name: 'PUBG', host: 'api.pubg.com', port: 443, a: 'пабг пубг' },
+  { g: 'Игры', name: 'Escape from Tarkov', host: 'prod.escapefromtarkov.com', port: 443, a: 'тарков eft' },
+  { g: 'Игры', name: 'GTA Online', host: 'prod.ros.rockstargames.com', port: 443, a: 'гта рокстар rockstar' },
+  { g: 'Игры', name: 'Call of Duty', host: 'profile.callofduty.com', port: 443, a: 'колда cod warzone варзон' },
+  { g: 'Игры', name: 'Destiny 2', host: 'www.bungie.net', port: 443, a: 'дестини bungie' },
+  { g: 'Игры', name: 'Warframe', host: 'api.warframe.com', port: 443, a: 'варфрейм' },
+  { g: 'Игры', name: 'War Thunder', host: 'login.gaijin.net', port: 443, a: 'вартандер гайдзин gaijin' },
+  { g: 'Игры', name: 'Path of Exile', host: 'www.pathofexile.com', port: 443, a: 'поэ poe' },
+  { g: 'Игры', name: 'Dead by Daylight', host: 'latest.live.bhvrdbd.com', port: 443, a: 'дбд dbd' },
+  { g: 'Игры', name: 'Rust', host: 'api.facepunch.com', port: 443, a: 'раст facepunch' },
+  { g: 'Игры', name: 'osu', host: 'osu.ppy.sh', port: 443, a: 'осу' },
+
+  { g: 'Платформы', name: 'Steam', host: 'api.steampowered.com', port: 443, a: 'стим' },
+  { g: 'Платформы', name: 'Steam Community', host: 'steamcommunity.com', port: 443, a: 'стим комьюнити профиль' },
+  { g: 'Платформы', name: 'Steam Store', host: 'store.steampowered.com', port: 443, a: 'стим магазин' },
+  { g: 'Платформы', name: 'Epic Online', host: 'api.epicgames.dev', port: 443, a: 'эпик epic' },
+  { g: 'Платформы', name: 'Riot', host: 'auth.riotgames.com', port: 443, a: 'риот' },
+  { g: 'Платформы', name: 'Battle.net', host: 'us.actual.battle.net', port: 1119, a: 'близзард blizzard батлнет' },
+  { g: 'Платформы', name: 'Xbox Live', host: 'title.mgt.xboxlive.com', port: 443, a: 'иксбокс хбокс' },
+  { g: 'Платформы', name: 'PlayStation Network', host: 'auth.api.sonyentertainmentnetwork.com', port: 443, a: 'плейстейшн псн psn sony' },
+  { g: 'Платформы', name: 'Nintendo', host: 'accounts.nintendo.com', port: 443, a: 'нинтендо свитч switch' },
+  { g: 'Платформы', name: 'EA App', host: 'accounts.ea.com', port: 443, a: 'еа origin ориджин' },
+  { g: 'Платформы', name: 'Ubisoft Connect', host: 'public-ubiservices.ubi.com', port: 443, a: 'юбисофт uplay юплей' },
+  { g: 'Платформы', name: 'GOG', host: 'www.gog.com', port: 443, a: 'гог' },
+  { g: 'Платформы', name: 'itch.io', host: 'itch.io', port: 443, a: 'итч' },
+
+  { g: 'Сервисы', name: 'Twitch', host: 'gql.twitch.tv', port: 443, a: 'твич' },
+  { g: 'Сервисы', name: 'Telegram API', host: 'api.telegram.org', port: 443, a: 'телеграм тг' },
+  { g: 'Сервисы', name: 'Instagram', host: 'i.instagram.com', port: 443, a: 'инстаграм инста' },
+  { g: 'Сервисы', name: 'Facebook', host: 'graph.facebook.com', port: 443, a: 'фейсбук фб' },
+  { g: 'Сервисы', name: 'X (Twitter)', host: 'api.x.com', port: 443, a: 'твиттер икс twitter' },
+  { g: 'Сервисы', name: 'TikTok', host: 'www.tiktok.com', port: 443, a: 'тикток' },
+  { g: 'Сервисы', name: 'Reddit', host: 'www.reddit.com', port: 443, a: 'реддит' },
+  { g: 'Сервисы', name: 'Spotify', host: 'api.spotify.com', port: 443, a: 'спотифай' },
+  { g: 'Сервисы', name: 'SoundCloud', host: 'api-v2.soundcloud.com', port: 443, a: 'саундклауд' },
+  { g: 'Сервисы', name: 'Netflix', host: 'www.netflix.com', port: 443, a: 'нетфликс' },
+  { g: 'Сервисы', name: 'Signal', host: 'chat.signal.org', port: 443, a: 'сигнал' },
+  { g: 'Сервисы', name: 'WhatsApp', host: 'web.whatsapp.com', port: 443, a: 'вотсап ватсап' },
+  { g: 'Сервисы', name: 'Zoom', host: 'zoom.us', port: 443, a: 'зум' },
+  { g: 'Сервисы', name: 'Slack', host: 'slack.com', port: 443, a: 'слак' },
+  { g: 'Сервисы', name: 'Figma', host: 'www.figma.com', port: 443, a: 'фигма' },
+  { g: 'Сервисы', name: 'Notion', host: 'www.notion.so', port: 443, a: 'ноушен' },
+  { g: 'Сервисы', name: 'GitHub', host: 'api.github.com', port: 443, a: 'гитхаб гит' },
+  { g: 'Сервисы', name: 'npm', host: 'registry.npmjs.org', port: 443, a: 'нпм' },
+  { g: 'Сервисы', name: 'PyPI', host: 'pypi.org', port: 443, a: 'пипи питон' },
+  { g: 'Сервисы', name: 'Docker Hub', host: 'registry-1.docker.io', port: 443, a: 'докер' },
+  { g: 'Сервисы', name: 'Hugging Face', host: 'huggingface.co', port: 443, a: 'хаггинг' },
+  { g: 'Сервисы', name: 'ChatGPT', host: 'chatgpt.com', port: 443, a: 'чатгпт гпт openai' },
+  { g: 'Сервисы', name: 'Claude', host: 'api.anthropic.com', port: 443, a: 'клод anthropic' },
+  { g: 'Сервисы', name: 'Proton Mail', host: 'mail.proton.me', port: 443, a: 'протон' },
+  { g: 'Сервисы', name: 'Cloudflare 1.1.1.1', host: 'one.one.one.one', port: 443, a: 'клаудфлер dns днс' },
 ];
 
 let cmdItems = [];
@@ -1353,10 +1388,38 @@ function parseTarget(raw) {
   return { host, port, suggested: label.charAt(0).toUpperCase() + label.slice(1) };
 }
 
+// Насколько строка каталога подходит запросу. Ноль — не подходит.
+//
+// Раньше это была подстрока по имени и хосту. Она молчала на «кс» и «дота»,
+// как их и набирают, зато охотно ставила случайное совпадение в длинном
+// служебном хосте выше точного совпадения по названию. Порядок здесь — от
+// самого уверенного совпадения к самому случайному.
+function matchScore(c, q) {
+  const name = c.name.toLowerCase();
+  const host = c.host.toLowerCase();
+  const aliases = (c.a || '').toLowerCase().split(' ').filter(Boolean);
+  if (name === q) return 100;
+  if (name.startsWith(q)) return 90;
+  // С начала слова: «legends» найдёт Apex Legends, «exile» — Path of Exile.
+  if (name.split(/[\s(:.-]+/).some((w) => w.startsWith(q))) return 80;
+  if (aliases.some((w) => w === q)) return 75;
+  if (aliases.some((w) => w.startsWith(q))) return 70;
+  if (name.includes(q)) return 60;
+  if (host.startsWith(q)) return 50;
+  if (host.includes(q)) return 40;
+  return 0;
+}
+
 function buildCmdItems(query) {
   const q = query.trim().toLowerCase();
   const have = new Set(knownTargets.map((t) => `${t.host}:${t.port}`));
-  const list = CATALOG.filter((c) => !q || c.name.toLowerCase().includes(q) || c.host.includes(q)).map((c) => ({
+  const matched = q
+    ? CATALOG.map((c) => ({ c, s: matchScore(c, q) }))
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s || a.c.name.localeCompare(b.c.name, 'ru'))
+        .map((x) => x.c)
+    : CATALOG;
+  const list = matched.map((c) => ({
     ...c,
     added: have.has(`${c.host}:${c.port}`),
   }));
@@ -1395,7 +1458,7 @@ function renderCmdList() {
         .map(
           ({ it, i }) => `
         <div class="cmd-item${i === cmdIdx ? ' active' : ''}" data-i="${i}">
-          <span class="cmd-initial">${esc((it.custom ? it.suggested : it.name).charAt(0).toUpperCase())}</span>
+          <span class="cmd-initial" data-host="${esc(it.host)}">${esc((it.custom ? it.suggested : it.name).charAt(0).toUpperCase())}</span>
           <div class="cmd-item-text">
             <div class="cmd-item-name">${esc(it.custom ? it.suggested : it.name)}</div>
             <div class="cmd-item-host">${esc(it.host)}:${it.port}</div>
@@ -1415,6 +1478,55 @@ function renderCmdList() {
   });
   const active = box.querySelector('.cmd-item.active');
   if (active) active.scrollIntoView({ block: 'nearest' });
+  loadFavicons(box);
+}
+
+// Иконки сервисов.
+//
+// Только для строк, которые сейчас на экране, и по одной: каждая — поход в
+// сеть через curl, а список перерисовывается на каждое нажатие клавиши.
+// Ответ кладём в кэш процесса, поэтому повторный показ той же строки уже
+// ничего не спрашивает; на диске кэш держит Rust, так что и следующий
+// запуск программы обойдётся без сети.
+const faviconCache = new Map(); // host -> data-URI, null (не нашлось) или Promise
+
+// То, что пришло из сети, попадает в url() внутри style. Base64 не может
+// содержать кавычек, но проверяем форму явно, а не полагаемся на это.
+const SAFE_ICON = /^data:image\/[a-z.+-]+;base64,[A-Za-z0-9+/=]+$/;
+
+function paintFavicon(host, uri) {
+  if (!uri || !SAFE_ICON.test(uri)) return;
+  document.querySelectorAll('.cmd-initial').forEach((slot) => {
+    if (slot.dataset.host !== host) return;
+    slot.style.backgroundImage = `url("${uri}")`;
+    slot.classList.add('has-icon');
+    slot.textContent = '';
+  });
+}
+
+function loadFavicons(box) {
+  box.querySelectorAll('.cmd-initial').forEach((slot) => {
+    const host = slot.dataset.host;
+    if (!host) return;
+    const cached = faviconCache.get(host);
+    if (cached === null || cached instanceof Promise) return;
+    if (typeof cached === 'string') {
+      paintFavicon(host, cached);
+      return;
+    }
+    const p = window.zapret
+      .getFavicon(host)
+      .then((r) => {
+        const uri = r && r.ok ? r.dataUri : null;
+        faviconCache.set(host, uri);
+        paintFavicon(host, uri);
+      })
+      .catch(() => {
+        // Иконка — украшение: не нашлась, значит остаётся буква.
+        faviconCache.set(host, null);
+      });
+    faviconCache.set(host, p);
+  });
 }
 
 async function cmdPick(it) {
@@ -1535,6 +1647,14 @@ function parseResults(text) {
 // Раньше здесь были ещё и словесные уровни («Пробивает»/«Частично»/«Не
 // пробивает») — убрали: сам процент точнее и не нуждается в переводе на
 // три размытые категории. Цвет остаётся, чтобы шкала читалась с одного взгляда.
+// «6 из 7» вместо голого числа: сколько целей прошла лучшая стратегия
+// прогона и сколько их вообще было. Число целей задаёт релиз и режим, а не
+// константа — раньше здесь стояла доля, умноженная на семь.
+function bestOf(run) {
+  if (!run || !run.bestTotal) return '—';
+  return `${run.bestOk} из ${run.bestTotal}`;
+}
+
 function verdictColor(score) {
   return score >= 0.85 ? 'var(--green)' : score >= 0.4 ? 'var(--tx-3)' : 'var(--red-row)';
 }
@@ -1829,7 +1949,7 @@ async function loadTestsHistory() {
           <span class="snap-best">${esc(r.best ? displayName(r.best) : '—')}</span>
         </div>
         <div class="snap-right">
-          <span class="snap-stat">лучший результат ${r.maxScore}</span>
+          <span class="snap-stat">лучший результат ${bestOf(r)}</span>
           <span class="cf-link" data-open="${esc(r.file)}">Открыть</span>
         </div>
       </div>`
@@ -1889,7 +2009,7 @@ async function loadOverview() {
 
   if (testHistory.ok && testHistory.runs.length) {
     const last = testHistory.runs[testHistory.runs.length - 1];
-    $('statLastRun').textContent = `${last.date} · ${last.maxScore}`;
+    $('statLastRun').textContent = `${last.date} · ${bestOf(last)}`;
     lastTestBest = last.best || null;
   } else {
     $('statLastRun').textContent = 'ещё не запускались';
@@ -2599,15 +2719,33 @@ $('extraStrategiesBtn').onclick = async () => {
 
 let lastDiagResults = null;
 
-function buildDiagReport(results) {
+async function buildDiagReport(results) {
   const release = currentState.rootPath ? currentState.rootPath.split(/[\\/]/).pop() : 'не загружен';
-  return [
+  const lines = [
     'Klutz — диагностика системы',
     new Date().toLocaleString('ru-RU'),
     `Релиз: ${release}`,
     '',
     ...results.map((r) => `${r.ok ? '✓' : '✗'} ${r.label}${r.warn ? ' — ' + r.warn : ''}`),
-  ].join('\n');
+  ];
+
+  // Журнал winws — единственное место, где видно, ПОЧЕМУ обход не поднялся.
+  // Шторку логов из интерфейса убрали по макету, и бэкенд с тех пор собирал
+  // строки в никуда. Отчёт диагностики — это то, что пользователь присылает,
+  // когда «не работает», так что место журналу здесь.
+  try {
+    const log = await window.zapret.getWinwsLog();
+    const tail = (log && log.lines ? log.lines : []).slice(-50);
+    if (tail.length) {
+      const state = log.live ? 'процесс запущен' : 'процесс не запущен';
+      lines.push('', `— журнал winws, последние ${tail.length} строк (${state}) —`, ...tail);
+    }
+  } catch (err) {
+    // Отчёт без журнала лучше, чем отсутствие отчёта.
+    lines.push('', `— журнал winws недоступен: ${err && err.message ? err.message : err} —`);
+  }
+
+  return lines.join('\n');
 }
 
 $('copyDiagBtn').onclick = async () => {
@@ -2621,7 +2759,7 @@ $('copyDiagBtn').onclick = async () => {
   }
   if (!lastDiagResults) return;
 
-  const text = buildDiagReport(lastDiagResults);
+  const text = await buildDiagReport(lastDiagResults);
   let copied = false;
   let lastErr = null;
   try {
@@ -2706,7 +2844,6 @@ async function changeRelease() {
   render();
 }
 
-$('changeReleaseBtn').onclick = changeRelease;
 $('changeReleaseBtn2').onclick = changeRelease;
 
 $('openReleaseFolderBtn').onclick = async () => {

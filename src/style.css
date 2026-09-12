@@ -274,11 +274,14 @@ html[data-theme="dark"] .icon-sun { display: block; }
    Специфичность намеренно задрана: .sb-logo img / .about-head img задают
    display: block и иначе перебивают эти правила. */
 .sb-logo img.logo-dark,
-.about-head img.logo-dark { display: none; }
+.about-head img.logo-dark,
+.dz-icon img.logo-dark { display: none; }
 html[data-theme="dark"] .sb-logo img.logo-light,
-html[data-theme="dark"] .about-head img.logo-light { display: none; }
+html[data-theme="dark"] .about-head img.logo-light,
+html[data-theme="dark"] .dz-icon img.logo-light { display: none; }
 html[data-theme="dark"] .sb-logo img.logo-dark,
-html[data-theme="dark"] .about-head img.logo-dark { display: block; }
+html[data-theme="dark"] .about-head img.logo-dark,
+html[data-theme="dark"] .dz-icon img.logo-dark { display: block; }
 
 .link-btn {
   border: none;
@@ -374,6 +377,7 @@ html[data-theme="dark"] .about-head img.logo-dark { display: block; }
   color: var(--green);
   background: var(--subtle);
 }
+.dz-icon img { width: 30px; height: 30px; display: block; }
 
 .dropzone-inner h2 {
   margin: 0 0 8px;
@@ -488,7 +492,13 @@ html[data-theme="dark"] .about-head img.logo-dark { display: block; }
 .nav-item .knob-fill { fill: var(--sidebar); }
 .nav-item:hover { background: var(--pill); color: var(--tx); }
 .nav-item.active { background: var(--nav-active); color: var(--tx); font-weight: 600; }
-.nav-item.active svg { stroke: var(--green); fill: var(--green); }
+/* Через color, а не fill: у иконок собственный `fill="currentColor"` на
+   каждом контуре, и заливка, заданная корню <svg>, до них не доходит —
+   свой атрибут контура сильнее наследования. Красим то, на что они
+   действительно смотрят.
+   Обводку здесь ставить нельзя: её у этих иконок нет, и добавленный stroke
+   утолщал каждый контур — выглядело так, будто иконка растёт при переходе. */
+.nav-item.active svg { color: var(--green); }
 
 .sb-spacer { flex: 1; }
 
@@ -1387,13 +1397,17 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
 }
 .cmd-row:hover { background: var(--pill); color: var(--tx-2); }
 .cmd-row-text { flex: 1; min-width: 0; }
+/* Плоский, без заливки — как в макете: подсказка о горячей клавише не должна
+   читаться как отдельная кнопка. */
 .cmd-row-key {
   font-size: 12px;
+  font-weight: 600;
   color: var(--tx-5);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 2px 6px;
-  background: var(--raised);
+  border: 1px solid var(--line-input);
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: transparent;
+  flex: 0 0 auto;
 }
 
 .cmd-overlay {
@@ -1464,7 +1478,10 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
   height: 26px;
   flex: 0 0 auto;
   border-radius: 7px;
-  background: var(--pill);
+  /* background-color, а не сокращённое background: сокращённая запись
+     сбрасывает size/position/repeat, а в этой ячейке лежит иконка сервиса,
+     которой они и задают размер. */
+  background-color: var(--pill);
   border: 1px solid var(--line);
   display: flex;
   align-items: center;
@@ -1472,8 +1489,20 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
   font-size: 13px;
   font-weight: 700;
   color: var(--tx-3);
+  /* Геометрия фона живёт здесь, а не только в .has-icon: у правила для
+     выделенной строки специфичность выше, и его сокращённый background
+     обнулял размер — иконка разворачивалась во всю ячейку от угла. */
+  background-size: 16px 16px;
+  background-position: center;
+  background-repeat: no-repeat;
 }
-.cmd-item.active .cmd-initial { background: var(--raised); }
+.cmd-item.active .cmd-initial { background-color: var(--raised); }
+/* Настоящая иконка сервиса вместо буквы. Фоном, а не <img>: подложка и
+   рамка остаются от заглушки, а разномастные favicon — от квадратных
+   до узких — вписываются в один размер без рывка вёрстки. */
+.cmd-initial.has-icon {
+  background-color: var(--raised);
+}
 .cmd-item-text { min-width: 0; flex: 1; }
 .cmd-item-name { font-size: 14.5px; color: var(--tx); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmd-item-host { font-size: 13px; color: var(--tx-5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1637,6 +1666,14 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
 .snap-stat { font-size: 13.5px; color: var(--tx-5); }
 
 /* ─────────── Пинг-карточки ─────────── */
+/* Не карточка: в макете это просто подпись над сеткой. Рамка вокруг сетки
+   карточек давала двойную рамку — внешнюю у блока и свою у каждой плитки. */
+.ping-block-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--tx-3);
+  margin-bottom: 10px;
+}
 .ping-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 
 .ping-card {
@@ -1980,8 +2017,19 @@ html[data-theme="dark"] .tour-highlight { box-shadow: 0 0 0 9999px rgba(0,0,0,.7
 }
 .tour-callout h4 { margin: 0 0 8px; font-size: 15.5px; font-weight: 700; color: var(--tx); }
 .tour-callout p { margin: 0 0 14px; font-size: 14px; line-height: 1.55; color: var(--tx-2); }
-.tour-callout-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.tour-nav { display: flex; gap: 6px; }
+/* Три кнопки в 268 доступных пикселей не помещались, а flex по умолчанию не
+   ужимает элементы меньше их содержимого — вместо переноса они вылезали за
+   правый край выноски. Перенос на вторую строку вместо выхода за край;
+   space-between заменён на margin-left у навигации, иначе при переносе она
+   прижималась бы влево. */
+.tour-callout-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tour-callout-actions .btn { white-space: nowrap; }
+.tour-nav { display: flex; gap: 6px; margin-left: auto; }
 
 /* ─────────── Узкое окно ─────────── */
 @media (max-width: 1040px) {

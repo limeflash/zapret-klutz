@@ -10,6 +10,7 @@ mod autostart;
 mod autotest;
 mod commands;
 mod diag;
+mod favicon;
 mod maintenance;
 mod monitor;
 mod notify;
@@ -105,6 +106,7 @@ pub fn run() {
             commands::stop_config,
             commands::get_winws_log,
             commands::check_games,
+            commands::get_favicon,
             commands::get_game_targets,
             commands::get_default_game_targets,
             commands::save_game_targets,

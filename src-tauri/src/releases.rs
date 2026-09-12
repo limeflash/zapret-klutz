@@ -76,6 +76,33 @@ pub fn latest_release() -> LatestRelease {
     }
 }
 
+/// Куда мы вообще готовы пойти за архивом.
+///
+/// Адрес приходит полем `browser_download_url` из ответа GitHub и раньше
+/// уезжал в curl как есть. Распакованное из этого архива потом запускается
+/// администратором, так что «куда сказали, туда и пошли» здесь слишком
+/// дорого стоит.
+const ASSET_HOSTS: [&str; 4] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
+];
+
+/// Только https и только к GitHub. Отдельно отсекаем `user@host`: это
+/// обычный способ увести запрос на чужой адрес, оставив знакомый на вид URL.
+pub fn download_url_allowed(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = authority.split(':').next().unwrap_or("");
+    ASSET_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h))
+}
+
 /// Куда складываем скачанные релизы — рядом с настройками приложения.
 pub fn releases_dir(app: &AppHandle) -> PathBuf {
     let dir = app.path().app_data_dir().expect("no app data dir").join("releases");
@@ -91,6 +118,12 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
     if !info.ok {
         return Err(info.error.unwrap_or_else(|| "не удалось получить релиз".into()));
     }
+    if !download_url_allowed(&info.url) {
+        return Err(format!(
+            "GitHub вернул ссылку на неожиданный адрес, скачивание отменено: {}",
+            info.url
+        ));
+    }
     let dest = releases_dir(app).join(&info.name);
 
     #[allow(unused_mut)]
@@ -99,6 +132,13 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
         "-L",
         "--fail",
         "--progress-bar",
+        // Ни сам запрос, ни редирект за ним не должны сойти на http:
+        // -L идёт по цепочке сам, и без этого её хвост мог бы оказаться
+        // открытым.
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
         // Иначе зависшее после установки соединение держит нас вечно:
         // общего таймаута на закачку ставить нельзя (файл большой), а вот
         // «меньше килобайта в секунду полминуты» — верный признак смерти.
@@ -146,6 +186,26 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
         let _ = fs::remove_file(&dest);
         return Err("Скачивание не удалось.".into());
     }
+    // Размер архива известен из ответа API — сверяем. Хэша апстрим не
+    // публикует, так что подмену это не ловит; обрыв и усечение — ловит, а
+    // из этого архива потом запускается winws.exe с правами администратора.
+    if info.size > 0 {
+        match fs::metadata(&dest) {
+            Ok(m) if m.len() == info.size => {}
+            Ok(m) => {
+                let _ = fs::remove_file(&dest);
+                return Err(format!(
+                    "Размер скачанного архива не совпал с заявленным: {} байт вместо {}. Файл удалён.",
+                    m.len(),
+                    info.size
+                ));
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&dest);
+                return Err(format!("Не удалось проверить скачанный архив: {e}"));
+            }
+        }
+    }
     let _ = app.emit("download-progress", 100u8);
     Ok(dest)
 }
@@ -166,27 +226,52 @@ fn parse_percent(chunk: &str) -> Option<u8> {
     num.parse::<f64>().ok().map(|v| v.clamp(0.0, 100.0) as u8)
 }
 
-/// Распаковка .zip. Внутри архивы zapret обычно лежат одной верхней папкой —
-/// если так, корнем релиза считаем её, а не временную обёртку.
+/// Распаковка .zip.
+///
+/// Пишем во временную папку рядом и подменяем готовое одним движением.
+/// Раскладывать файлы поверх существующего релиза нельзя: на любом сбое —
+/// занятый файл, нехватка места, антивирус — остаётся огрызок, который
+/// выглядит как релиз, но уже без `winws.exe` и части конфигов. Приложение
+/// потом честно считает такую папку негодной, а человек видит лишь странную
+/// ошибку и сломанную установку.
+///
+/// Внутри архивы zapret обычно лежат одной верхней папкой — если так,
+/// корнем релиза считаем её, а не временную обёртку.
 pub fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<PathBuf, String> {
-    let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
+    let parent = target_dir.parent().ok_or("некуда распаковывать")?;
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
 
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
-        // enclosed_name отбрасывает пути с ".." — защита от zip slip.
-        let Some(rel) = entry.enclosed_name() else { continue };
-        let out = target_dir.join(rel);
-        if entry.is_dir() {
-            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-            continue;
+    let leaf = target_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "release".into());
+    // Рядом с целью, а не в %TEMP%: переименование работает мгновенно только
+    // в пределах одного тома, а каталог релизов может лежать не на системном.
+    let staging = parent.join(format!(".{leaf}.partial"));
+    let _ = fs::remove_dir_all(&staging);
+
+    if let Err(e) = unpack_into(zip_path, &staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+
+    if target_dir.exists() && fs::remove_dir_all(target_dir).is_err() {
+        // Почти всегда это загруженный драйвер: он держит bin\WinDivert64.sys
+        // и остаётся в ядре после выхода winws.exe. Гасим обход и пробуем ещё
+        // раз — иначе обновить релиз можно было бы только перезагрузкой.
+        crate::winws::stop_winws();
+        for name in ["WinDivert", "WinDivert14"] {
+            crate::sys::run("net", &["stop", name]);
         }
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        if let Err(e) = fs::remove_dir_all(target_dir) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(locked_hint(&e));
         }
-        let mut dst = fs::File::create(&out).map_err(|e| e.to_string())?;
-        std::io::copy(&mut entry, &mut dst).map_err(|e| e.to_string())?;
+    }
+
+    if let Err(e) = fs::rename(&staging, target_dir) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(locked_hint(&e));
     }
 
     let entries: Vec<_> = fs::read_dir(target_dir)
@@ -197,6 +282,42 @@ pub fn extract_zip(zip_path: &Path, target_dir: &Path) -> Result<PathBuf, String
         return Ok(entries[0].path());
     }
     Ok(target_dir.to_path_buf())
+}
+
+fn unpack_into(zip_path: &Path, dir: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        // enclosed_name отбрасывает пути с ".." — защита от zip slip.
+        let Some(rel) = entry.enclosed_name() else { continue };
+        let out = dir.join(rel);
+        if entry.is_dir() {
+            fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(p) = out.parent() {
+            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        let mut dst = fs::File::create(&out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut dst).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// «Процесс не может получить доступ к файлу» человеку не объясняет ничего.
+/// Ошибка 32 здесь почти всегда об одном и том же.
+fn locked_hint(e: &std::io::Error) -> String {
+    if e.raw_os_error() == Some(32) {
+        "Файлы релиза заняты: в памяти остался драйвер WinDivert.          Останови обход и попробуй снова; если не поможет — перезагрузи компьютер."
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        e.to_string()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -257,11 +378,86 @@ mod unit_tests {
     use super::*;
 
     #[test]
+    fn ссылка_на_архив_принимается_только_от_github_по_https() {
+        assert!(download_url_allowed(
+            "https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.9.9c/a.zip"
+        ));
+        assert!(download_url_allowed("https://objects.githubusercontent.com/x/y.zip"));
+        assert!(download_url_allowed("https://RELEASE-ASSETS.githubusercontent.com/x.zip"));
+
+        assert!(!download_url_allowed("http://github.com/x.zip"), "http не годится");
+        assert!(!download_url_allowed("https://evil.example/x.zip"));
+        assert!(!download_url_allowed("https://github.com.evil.example/x.zip"));
+        assert!(!download_url_allowed("https://github.com@evil.example/x.zip"), "user@host");
+        assert!(!download_url_allowed("ftp://github.com/x.zip"));
+        assert!(!download_url_allowed(""));
+    }
+
+    #[test]
     fn процент_из_полосы_curl() {
         assert_eq!(parse_percent("######                    45.2%"), Some(45));
         assert_eq!(parse_percent("100.0%"), Some(100));
         assert_eq!(parse_percent(""), None);
         assert_eq!(parse_percent("######"), None);
         assert_eq!(parse_percent("просто текст"), None);
+    }
+    /// Минимальный .zip с одним файлом внутри.
+    fn make_zip(path: &std::path::Path, inner: &str, body: &[u8]) {
+        let f = fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        w.start_file(inner, zip::write::SimpleFileOptions::default()).unwrap();
+        use std::io::Write;
+        w.write_all(body).unwrap();
+        w.finish().unwrap();
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("klutz-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn распаковка_заменяет_старый_релиз_целиком() {
+        let dir = scratch("replace");
+        let target = dir.join("release");
+
+        let z1 = dir.join("a.zip");
+        make_zip(&z1, "старый.txt", b"1");
+        extract_zip(&z1, &target).unwrap();
+        assert!(target.join("старый.txt").exists());
+
+        let z2 = dir.join("b.zip");
+        make_zip(&z2, "новый.txt", b"2");
+        extract_zip(&z2, &target).unwrap();
+
+        // Именно замена, а не подмешивание: файла из прошлой версии остаться
+        // не должно, иначе в релизе копятся чужие конфиги от старых выпусков.
+        assert!(target.join("новый.txt").exists());
+        assert!(!target.join("старый.txt").exists(), "старый файл пережил распаковку");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn сорванная_распаковка_не_портит_то_что_уже_стоит() {
+        let dir = scratch("keep");
+        let target = dir.join("release");
+
+        let good = dir.join("good.zip");
+        make_zip(&good, "winws.exe", b"real release");
+        extract_zip(&good, &target).unwrap();
+
+        // Битый архив: раньше файлы ложились прямо в цель, и такой обрыв
+        // оставлял папку, похожую на релиз, но без половины файлов.
+        let broken = dir.join("broken.zip");
+        fs::write(&broken, b"not a zip at all").unwrap();
+        assert!(extract_zip(&broken, &target).is_err());
+
+        assert!(target.join("winws.exe").exists(), "рабочий релиз пострадал от чужого сбоя");
+        assert_eq!(fs::read(target.join("winws.exe")).unwrap(), b"real release");
+        // И мусор после себя не оставили.
+        assert!(!dir.join(".release.partial").exists(), "осталась временная папка");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

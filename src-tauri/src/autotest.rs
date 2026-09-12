@@ -138,13 +138,10 @@ fn maybe_run(app: &AppHandle) {
     match result {
         Ok(text) => {
             let (rows, dpi) = crate::tests::parse_results(&text);
+            // Тот же порядок, что у трея, истории и самолечения.
             let best = rows
                 .iter()
-                .max_by(|a, b| {
-                    a.score(dpi)
-                        .partial_cmp(&b.score(dpi))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
+                .min_by(|a, b| crate::tests::rank_desc(a, b, dpi))
                 .map(|r| r.config.trim_end_matches(".bat").to_string());
             crate::notify::send_from(
                 app,

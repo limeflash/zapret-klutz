@@ -1,9 +1,17 @@
 [package]
 name = "klutz"
-version = "1.1.0"
+version = "1.2.3"
 description = "GUI for managing and testing zapret-discord-youtube DPI bypass configs"
 authors = ["vbu00"]
 edition = "2021"
+
+[[bin]]
+name = "klutz"
+path = "src/main.rs"
+# Тестового харнесса у бинарника нет, а манифест требует прав администратора:
+# `cargo test` пытался запустить klutz.exe и падал с «требуется повышение»
+# (os error 740), хотя все тесты в библиотеке уже прошли.
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
