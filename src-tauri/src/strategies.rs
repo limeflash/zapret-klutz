@@ -49,6 +49,35 @@ const EXTRA_SPLIT_POS: &[(&str, &str)] = &[
 static SPLIT_POS: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"--dpi-desync-split-pos=[^\s\^]+").unwrap());
 
+static FOOLING: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"--dpi-desync-fooling=([^\s\^]+)").unwrap());
+
+/// Какие приёмы обмана встречаются в ЭТОМ релизе, кроме уже стоящего в
+/// образце.
+///
+/// Почему не свой список. Позиция разреза — это число, и любое число
+/// синтаксически годится. А `fooling` — перечисление, и неподдерживаемое
+/// значение винвс просто не съест: вариант не запустится, а человек решит,
+/// что дело в стратегии. Берём только то, что автор релиза уже где-то
+/// применил: раз оно лежит в рабочем конфиге, этот бинарник его понимает.
+fn fooling_values(root: &Path, template_value: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in crate::release::list_configs(root) {
+        if is_variant(&name) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
+        for c in FOOLING.captures_iter(&text) {
+            let v = c[1].to_string();
+            if Some(v.as_str()) != template_value && !out.contains(&v) {
+                out.push(v);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Имя варианта несёт и шаблон, и суффикс. Без шаблона два поколения из
 /// разных конфигов давали одни и те же имена, и второе молча затирало
 /// первое — при том что содержимое у них разное.
@@ -107,6 +136,18 @@ pub fn generate(root: &Path, template: &str) -> Result<Vec<String>, String> {
         fs::write(root.join(&name), body.as_ref()).map_err(|e| format!("{name}: {e}"))?;
         made.push(name);
     }
+
+    // Вторая ось. Позиция разреза отвечает на вопрос «где резать», приём
+    // обмана — на другой: чем именно морочить коробку. Один и тот же разрез
+    // с `badsum` и с `md5sig` живёт по-разному, потому что часть коробок
+    // сверяет контрольную сумму, а часть нет.
+    let own = FOOLING.captures(&text).map(|c| c[1].to_string());
+    for value in fooling_values(root, own.as_deref()) {
+        let body = FOOLING.replace_all(&text, format!("--dpi-desync-fooling={value}").as_str());
+        let name = variant_name(template, &format!("обман {value}"));
+        fs::write(root.join(&name), body.as_ref()).map_err(|e| format!("{name}: {e}"))?;
+        made.push(name);
+    }
     Ok(made)
 }
 
@@ -153,6 +194,37 @@ mod unit_tests {
             "--filter-udp=443 --dpi-desync=multisplit --dpi-desync-split-pos=2 --dpi-desync-repeats=6",
         ]
         .join("\r\n")
+    }
+
+    #[test]
+    fn приёмы_обмана_берутся_только_из_релиза() {
+        let dir = релиз();
+        // В образце стоит ts. Рядом в релизе автор применил md5sig и badsum —
+        // значит этот winws их понимает, и подставлять их безопасно.
+        fs::write(dir.join("general.bat"), образец()).unwrap();
+        fs::write(dir.join("ALT.bat"), образец().replace("fooling=ts", "fooling=md5sig")).unwrap();
+        fs::write(dir.join("ALT2.bat"), образец().replace("fooling=ts", "fooling=badsum")).unwrap();
+
+        let made = generate(&dir, "general.bat").unwrap();
+        assert_eq!(made.len(), EXTRA_SPLIT_POS.len() + 2, "две оси: позиции и обман");
+
+        let v = fs::read_to_string(dir.join(variant_name(TPL, "обман badsum"))).unwrap();
+        assert!(v.contains("--dpi-desync-fooling=badsum"), "{v}");
+        assert!(!v.contains("--dpi-desync-fooling=ts"), "прежнее значение осталось");
+        // Позиция разреза при этом не тронута: оси меняем по одной.
+        assert!(v.contains("--dpi-desync-split-pos=1,midsld"), "{v}");
+    }
+
+    #[test]
+    fn выдуманных_приёмов_обмана_не_появляется() {
+        // Единственный конфиг, единственное значение — подставлять нечего.
+        // Свой список значений мы не держим намеренно: неподдерживаемое
+        // winws не съест, и вариант просто не запустится.
+        let dir = релиз();
+        fs::write(dir.join("general.bat"), образец()).unwrap();
+        let made = generate(&dir, "general.bat").unwrap();
+        assert_eq!(made.len(), EXTRA_SPLIT_POS.len());
+        assert!(!made.iter().any(|n| n.contains("обман")), "{made:?}");
     }
 
     #[test]
