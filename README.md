@@ -65,10 +65,11 @@ Semver, история — в [CHANGELOG.md](CHANGELOG.md). Каждый вып�
 
 ## Участники
 
-- [limeflash](https://github.com/limeflash) — разбор аудита 1.1.0 и правки по нему:
-  контракт Rust↔JS, замок прогона тестов, мониторинг, жизненный цикл процессов,
-  валидация, первые юнит-тесты.
-- [aleuuu](https://github.com/aleuuu)
+- **[limeflash](https://github.com/limeflash)** — разбор аудита 1.1.0 и правки по
+  нему: контракт Rust↔JS, замок прогона тестов, мониторинг, жизненный цикл
+  процессов, валидация, первые юнит-тесты.
+- **[aleuuu](https://github.com/aleuuu)**
+- **[vbu00](https://github.com/vbu00)** — сам Klutz.
 
 ## Благодарности
 
