@@ -100,7 +100,10 @@ pub fn install_service(root: &Path, file_name: &str) -> Result<(), String> {
 
     #[allow(unused_mut)]
     let mut cmd = Command::new(sys::system_exe("cmd.exe"));
-    cmd.args(["/c", "service.bat", "install_auto", file_name])
+    // Одним закавыченным токеном, как в запасном пути запуска winws: cmd
+    // разбирает свою строку заново, и опираться только на checked_config —
+    // это один рубеж обороны вместо двух.
+    cmd.raw_arg(format!("/c service.bat install_auto \"{file_name}\""))
         .current_dir(root);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(sys::CREATE_NO_WINDOW);
