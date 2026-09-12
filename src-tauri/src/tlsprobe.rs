@@ -61,7 +61,10 @@ pub enum FragVerdict {
 #[derive(Debug, Clone, Serialize)]
 pub struct FragProbe {
     pub whole: ChOutcome,
-    pub split: ChOutcome,
+    /// `None` — разрезанный не отправляли: целый и так прошёл, и второе
+    /// соединение ответило бы на уже решённый вопрос. Раньше сюда клался
+    /// `Answered`, и поле выдавало за замер то, чего не мерили.
+    pub split: Option<ChOutcome>,
     pub verdict: FragVerdict,
     /// Фраза для человека — её же кладём в лог прогона тестов.
     pub note: String,
@@ -272,18 +275,31 @@ fn outcome_from_err(e: &std::io::Error) -> ChOutcome {
 }
 
 /// Чистое правило вердикта — сеть дёргает вызывающий.
-pub fn classify_frag(whole: ChOutcome, split: ChOutcome) -> (FragVerdict, String) {
-    if whole == ChOutcome::NoConnect || split == ChOutcome::NoConnect {
-        return (
-            FragVerdict::Inconclusive,
-            "до адреса не достучались — про фрагментацию сказать нечего".into(),
-        );
+pub fn classify_frag(whole: ChOutcome, split: Option<ChOutcome>) -> (FragVerdict, String) {
+    let unreachable = (
+        FragVerdict::Inconclusive,
+        "до адреса не достучались — про фрагментацию сказать нечего".to_string(),
+    );
+    if whole == ChOutcome::NoConnect {
+        return unreachable;
     }
     if whole.passed() {
         return (
             FragVerdict::NotBlocked,
             "целый ClientHello доходит — резать нечего, дело не в имени".into(),
         );
+    }
+    // Целый не прошёл — значит разрезанный обязаны были отправить. Если его
+    // нет, вывода нет: «не мерили» это не «не помогает».
+    let Some(split) = split else {
+        return (
+            FragVerdict::Inconclusive,
+            "целый ClientHello не прошёл, а разрезанный не отправляли — сравнивать не с чем"
+                .into(),
+        );
+    };
+    if split == ChOutcome::NoConnect {
+        return unreachable;
     }
     if split.passed() {
         (
@@ -307,11 +323,7 @@ pub fn probe_fragmentation(ip: IpAddr, port: u16, sni: &str, timeout: Duration) 
     let whole = send_ch(ip, port, sni, false, timeout);
     // Разрезанный шлём, только если целый не прошёл: иначе платили бы вторым
     // соединением за вопрос, ответ на который уже известен.
-    let split = if whole.passed() {
-        ChOutcome::Answered
-    } else {
-        send_ch(ip, port, sni, true, timeout)
-    };
+    let split = if whole.passed() { None } else { Some(send_ch(ip, port, sni, true, timeout)) };
     let (verdict, note) = classify_frag(whole, split);
     FragProbe { whole, split, verdict, note }
 }
@@ -325,6 +337,11 @@ pub fn probe_fragmentation(ip: IpAddr, port: u16, sni: &str, timeout: Duration) 
 /// надежды не подала.
 pub fn aggregate(verdicts: &[FragVerdict]) -> (FragVerdict, String) {
     use FragVerdict::*;
+    // Пустой список — это «проверять было нечего», а не «до целей не
+    // достучались»: последнее утверждает сетевой отказ, которого не было.
+    if verdicts.is_empty() {
+        return (Inconclusive, "проверять было нечего — ни одной цели".into());
+    }
     if verdicts.contains(&Helps) {
         return (
             Helps,
@@ -335,12 +352,22 @@ pub fn aggregate(verdicts: &[FragVerdict]) -> (FragVerdict, String) {
     if verdicts.contains(&DoesNotHelp) {
         return (
             DoesNotHelp,
-            "разрез ClientHello не пробивает ни одну цель: коробка пересобирает сегменты              либо режут не по имени. Перебор стратегий, скорее всего, ничего не даст"
+            "разрез ClientHello не пробивает ни одну цель: коробка пересобирает \
+             сегменты либо режут не по имени. Перебор стратегий, скорее всего, \
+             ничего не даст"
                 .into(),
         );
     }
-    if !verdicts.is_empty() && verdicts.iter().all(|v| *v == NotBlocked) {
+    if verdicts.iter().all(|v| *v == NotBlocked) {
         return (NotBlocked, "цели и так открываются — подбирать нечего".into());
+    }
+    // Осталась смесь «открывается» и «не достучались». Сказать «до целей не
+    // достучались» здесь было бы неправдой: часть целей ответила.
+    if verdicts.contains(&NotBlocked) {
+        return (
+            Inconclusive,
+            "часть целей открывается, до остальных не достучались — общего вывода нет".into(),
+        );
     }
     (Inconclusive, "проверить не удалось — до целей не достучались".into())
 }
@@ -606,17 +633,31 @@ pub enum Tls13Verdict {
     NotApplicable,
 }
 
-pub fn classify_tls13(v13: bool, v12: bool) -> (Tls13Verdict, String) {
-    match (v13, v12) {
-        (true, _) => (Tls13Verdict::Ok, "TLS 1.3 проходит".into()),
-        (false, true) => (
+/// `answered13` — ответил ли сервер хоть чем-нибудь на ClientHello, умеющий
+/// 1.3. `negotiated13` — согласовал ли он при этом именно 1.3. `answered12` —
+/// прошло ли рукопожатие с ClientHello, знающим только 1.2.
+///
+/// Решает ОТВЕТ, а не версия. Раньше здесь стояло «согласовал 1.3», и сервер,
+/// умеющий только 1.2, отвечал согласованием 1.2 — то есть отвечал, — а его
+/// объявляли заблокированным по 1.3. Заблокированный ClientHello не отвечает
+/// вовсе; ответивший доехал, какую бы версию в нём ни выбрали.
+pub fn classify_tls13(answered13: bool, negotiated13: bool, answered12: bool) -> (Tls13Verdict, String) {
+    match (answered13, negotiated13, answered12) {
+        (true, true, _) => (Tls13Verdict::Ok, "TLS 1.3 проходит".into()),
+        (true, false, _) => (
+            Tls13Verdict::Ok,
+            "ClientHello с поддержкой 1.3 доехал, но сервер выбрал версию ниже — \
+             это его свойство, а не блокировка"
+                .into(),
+        ),
+        (false, _, true) => (
             Tls13Verdict::Blocked,
             "TLS 1.3 не проходит, а откат на 1.2 проходит — режут именно ClientHello 1.3. \
              Браузер по умолчанию говорит на 1.3, поэтому страница у человека не открывается, \
              хотя проверка, согласившаяся на 1.2, показала бы «работает»"
                 .into(),
         ),
-        (false, false) => (
+        (false, _, false) => (
             Tls13Verdict::NotApplicable,
             "не прошли ни 1.3, ни 1.2 — дело не в версии".into(),
         ),
@@ -630,17 +671,16 @@ pub fn probe_tls13_block(
     sni: &str,
     timeout: Duration,
 ) -> (Tls13Verdict, String) {
-    // Именно tls13, а не «пришёл ServerHello»: сервер, умеющий только 1.2,
-    // ответит на наш 1.3-способный ClientHello согласованием 1.2, и по факту
-    // ответа вышло бы «1.3 проходит».
-    let v13 = handshake_probe(ip, port, sni, false, timeout).0.tls13;
-    // Лишний заход платим, только когда 1.3 не прошёл.
-    let v12 = if v13 {
+    let (seen13, out13) = handshake_probe(ip, port, sni, false, timeout);
+    let answered13 = out13 == ChOutcome::Answered;
+    // Лишний заход платим, только когда на 1.3-совместимый ClientHello не
+    // ответили вовсе: только тогда вопрос «а на 1.2 ответят?» вообще стоит.
+    let answered12 = if answered13 {
         true
     } else {
         handshake_probe(ip, port, sni, true, timeout).0.server_hello
     };
-    classify_tls13(v13, v12)
+    classify_tls13(answered13, seen13.tls13, answered12)
 }
 
 #[cfg(test)]
@@ -701,14 +741,15 @@ mod unit_tests {
 
     #[test]
     fn вердикт_целый_прошёл() {
-        let (v, _) = classify_frag(ChOutcome::Answered, ChOutcome::Answered);
+        // Разрезанный в этом случае не отправляют вовсе.
+        let (v, _) = classify_frag(ChOutcome::Answered, None);
         assert_eq!(v, FragVerdict::NotBlocked);
     }
 
     #[test]
     fn вердикт_фрагментация_помогает() {
         for whole in [ChOutcome::Reset, ChOutcome::Silent] {
-            let (v, why) = classify_frag(whole, ChOutcome::Answered);
+            let (v, why) = classify_frag(whole, Some(ChOutcome::Answered));
             assert_eq!(v, FragVerdict::Helps, "{whole:?}");
             assert!(why.contains("подбор имеет смысл"));
         }
@@ -717,7 +758,7 @@ mod unit_tests {
     #[test]
     fn вердикт_фрагментация_не_помогает() {
         for split in [ChOutcome::Reset, ChOutcome::Silent] {
-            let (v, why) = classify_frag(ChOutcome::Reset, split);
+            let (v, why) = classify_frag(ChOutcome::Reset, Some(split));
             assert_eq!(v, FragVerdict::DoesNotHelp, "{split:?}");
             assert!(why.contains("бесполезно"));
         }
@@ -726,12 +767,23 @@ mod unit_tests {
     #[test]
     fn без_подключения_вывода_нет() {
         for (w, s) in [
-            (ChOutcome::NoConnect, ChOutcome::NoConnect),
-            (ChOutcome::Reset, ChOutcome::NoConnect),
+            (ChOutcome::NoConnect, Some(ChOutcome::NoConnect)),
+            (ChOutcome::NoConnect, None),
+            (ChOutcome::Reset, Some(ChOutcome::NoConnect)),
         ] {
             let (v, _) = classify_frag(w, s);
             assert_eq!(v, FragVerdict::Inconclusive);
         }
+    }
+
+    #[test]
+    fn неотправленный_разрез_это_не_не_помогает() {
+        // Целый не прошёл, разрезанный не слали — сравнивать не с чем.
+        // Раньше вызывающий подставлял сюда выдуманный `Answered`, и
+        // неизмеренное уходило в интерфейс как замер.
+        let (v, why) = classify_frag(ChOutcome::Reset, None);
+        assert_eq!(v, FragVerdict::Inconclusive);
+        assert!(why.contains("сравнивать не с чем"), "{why}");
     }
 
     #[test]
@@ -890,10 +942,22 @@ mod unit_tests {
     #[test]
     fn вердикт_по_версии_tls() {
         use Tls13Verdict::*;
-        assert_eq!(classify_tls13(true, false).0, Ok);
-        assert_eq!(classify_tls13(true, true).0, Ok);
-        assert_eq!(classify_tls13(false, true).0, Blocked);
-        assert_eq!(classify_tls13(false, false).0, NotApplicable);
+        // Ответил и согласовал 1.3 — всё хорошо.
+        assert_eq!(classify_tls13(true, true, true).0, Ok);
+        // Не ответил на 1.3, ответил на 1.2 — вот это блок.
+        assert_eq!(classify_tls13(false, false, true).0, Blocked);
+        // Молчит на обе — дело не в версии.
+        assert_eq!(classify_tls13(false, false, false).0, NotApplicable);
+    }
+
+    #[test]
+    fn сервер_без_tls13_не_объявляется_заблокированным() {
+        // Сервер умеет только 1.2. На наш 1.3-способный ClientHello он
+        // ОТВЕТИТ, просто согласует 1.2. Раньше вердикт строился на
+        // «согласовал 1.3», и такой сервер получал «режут ClientHello 1.3».
+        let (v, why) = classify_tls13(true, false, true);
+        assert_eq!(v, Tls13Verdict::Ok, "{why}");
+        assert!(why.contains("свойство"), "{why}");
     }
 
     #[test]
