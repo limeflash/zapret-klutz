@@ -2017,8 +2017,19 @@ html[data-theme="dark"] .tour-highlight { box-shadow: 0 0 0 9999px rgba(0,0,0,.7
 }
 .tour-callout h4 { margin: 0 0 8px; font-size: 15.5px; font-weight: 700; color: var(--tx); }
 .tour-callout p { margin: 0 0 14px; font-size: 14px; line-height: 1.55; color: var(--tx-2); }
-.tour-callout-actions { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.tour-nav { display: flex; gap: 6px; }
+/* Три кнопки в 268 доступных пикселей не помещались, а flex по умолчанию не
+   ужимает элементы меньше их содержимого — вместо переноса они вылезали за
+   правый край выноски. Перенос на вторую строку вместо выхода за край;
+   space-between заменён на margin-left у навигации, иначе при переносе она
+   прижималась бы влево. */
+.tour-callout-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tour-callout-actions .btn { white-space: nowrap; }
+.tour-nav { display: flex; gap: 6px; margin-left: auto; }
 
 /* ─────────── Узкое окно ─────────── */
 @media (max-width: 1040px) {
