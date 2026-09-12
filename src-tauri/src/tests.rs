@@ -130,6 +130,46 @@ pub fn parse_results(text: &str) -> (Vec<ResultRow>, bool) {
     (rows, true)
 }
 
+/// Чем кончился второй этап воронки.
+#[derive(Debug, PartialEq)]
+pub enum Stage2 {
+    /// Прогнали ровно то, что заказывали.
+    Ok,
+    /// Часть конфигов скрипт пропустил сам — он это делает, когда стратегия
+    /// не поднялась («Strategy failed to start»), и просто идёт дальше.
+    /// Строки остальных от этого не портятся.
+    Skipped(Vec<String>),
+    /// В файле есть конфиги, которых мы не заказывали. Значит наша нумерация
+    /// разошлась со скриптовой, и чужие числа подписаны нашими именами —
+    /// такому результату верить нельзя.
+    Mismatch,
+    /// Ни одной строки: считать нечего.
+    Empty,
+}
+
+/// Сверяем второй этап воронки по именам: номера конфигов мы отправляем
+/// вслепую, и единственное доказательство, что скрипт понял их так же, —
+/// имена в файле результатов.
+pub fn check_stage2(wanted: &[String], text: &str) -> Stage2 {
+    let bare = |s: &str| s.trim_end_matches(".bat").to_string();
+    let (rows, _) = parse_results(text);
+    if rows.is_empty() {
+        return Stage2::Empty;
+    }
+    let got: std::collections::HashSet<String> = rows.iter().map(|r| bare(&r.config)).collect();
+    let want: std::collections::HashSet<String> = wanted.iter().map(|s| bare(s)).collect();
+    if got.iter().any(|g| !want.contains(g)) {
+        return Stage2::Mismatch;
+    }
+    let mut missing: Vec<String> = want.difference(&got).cloned().collect();
+    if missing.is_empty() {
+        Stage2::Ok
+    } else {
+        missing.sort();
+        Stage2::Skipped(missing)
+    }
+}
+
 /// stdout и stderr — разные типы, а обрабатываем их одинаково.
 enum Either {
     Out(std::process::ChildStdout),
@@ -284,6 +324,25 @@ pub fn run_test_script(
 
     let file = newest_new_result(root, &before)
         .ok_or("Тесты завершились, но файл результатов не найден.")?;
+
+    // Скрипт заканчивается «Press any key to close...» и читает клавишу с
+    // консоли. Консоли у него нет — stdin мы подменили трубой, чтобы отвечать
+    // на вопросы, — поэтому ReadKey кидает исключение, а обработчик скрипта
+    // дописывает «Script interrupted». К этому моменту он уже и ipset вернул,
+    // и файл результатов сохранил: пугает только вид. Говорим об этом прямо,
+    // иначе последнее, что видит человек в логе, — слово ERROR.
+    let _ = app.emit(
+        "test-log",
+        format!(
+            concat!(
+                "Готово, результаты сохранены: {}. Если в логе есть ",
+                "«Press any key» и «Script interrupted» — это скрипт ждал ",
+                "нажатия клавиши; на результат они не влияют."
+            ),
+            file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        ),
+    );
+
     fs::read_to_string(file).map_err(|e| e.to_string())
 }
 
@@ -390,5 +449,52 @@ mod unit_tests {
         assert!(is_result_file("A.TXT"));
         assert!(!is_result_file("лог.log"));
         assert!(!is_result_file("подкаталог"));
+    }
+
+    /// Кусок настоящего файла результатов: строки ANALYTICS в формате HTTP.
+    fn analytics(names: &[&str]) -> String {
+        let mut t = String::from("=== ANALYTICS ===\n");
+        for n in names {
+            t.push_str(&format!(
+                "{n} : HTTP OK:  24, ERR:   0, UNSUP:  12, Ping OK:  16, Fail:   0\n"
+            ));
+        }
+        t
+    }
+
+    #[test]
+    fn пропущенный_скриптом_конфиг_не_повод_отбрасывать_прогон() {
+        // Скрипт сам пишет «Strategy failed to start ... Skipping» и идёт
+        // дальше — такой конфиг просто отсутствует в ANALYTICS. Раньше
+        // строгое равенство множеств объявляло это разъездом нумерации и
+        // выбрасывало годный второй этап целиком.
+        let wanted = vec!["general (EXP)".to_string(), "general (ALT9)".to_string()];
+        let text = analytics(&["general (EXP).bat"]);
+        assert_eq!(
+            check_stage2(&wanted, &text),
+            Stage2::Skipped(vec!["general (ALT9)".to_string()])
+        );
+    }
+
+    #[test]
+    fn чужое_имя_в_результате_это_разъезд_нумерации() {
+        let wanted = vec!["general (EXP)".to_string()];
+        let text = analytics(&["general (ALT5).bat"]);
+        assert_eq!(check_stage2(&wanted, &text), Stage2::Mismatch);
+    }
+
+    #[test]
+    fn ровно_заказанное_это_ок_независимо_от_bat() {
+        // В заказе имена без расширения, в файле — с ним. Сверка идёт по
+        // «голому» имени, иначе совпадений не было бы никогда.
+        let wanted = vec!["general (EXP)".to_string(), "general (ALT9).bat".to_string()];
+        let text = analytics(&["general (EXP).bat", "general (ALT9)"]);
+        assert_eq!(check_stage2(&wanted, &text), Stage2::Ok);
+    }
+
+    #[test]
+    fn пустой_результат_отличается_от_пропуска() {
+        let wanted = vec!["general (EXP)".to_string()];
+        assert_eq!(check_stage2(&wanted, "=== ANALYTICS ===\n"), Stage2::Empty);
     }
 }

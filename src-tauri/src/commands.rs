@@ -441,33 +441,55 @@ fn run_tests_inner(
         format!("── Этап 2: HTTP/Ping по {} конфигам, прошедшим DPI ──", passed.len()),
     );
     match crate::tests::run_test_script(app, root, false, Some(&passed)) {
-        Ok(text) => {
-            let (rows2, _) = crate::tests::parse_results(&text);
-            let got: std::collections::HashSet<String> = rows2
-                .iter()
-                .map(|r| r.config.trim_end_matches(".bat").to_string())
-                .collect();
-            let want: std::collections::HashSet<String> = wanted.iter().cloned().collect();
-            if got != want {
-                // Скрипт прогнал не то, что мы просили: наша нумерация и его
-                // разошлись. Выдать это за результат воронки нельзя — имена в
-                // файле будут не те, и «лучшая стратегия» окажется той, что
-                // не проверялась.
+        Ok(text) => match crate::tests::check_stage2(&wanted, &text) {
+            crate::tests::Stage2::Ok => RunTestsResult { ok: true, error: None, text },
+            // Конфиг, который не поднялся, скрипт пропускает сам и пишет об
+            // этом «Strategy failed to start». Он просто отсутствует в файле —
+            // на остальные строки это не влияет, и отбрасывать прогон незачем.
+            crate::tests::Stage2::Skipped(missing) => {
+                let _ = app.emit(
+                    "test-log",
+                    format!(
+                        "Скрипт пропустил конфиги, они не запустились: {}. Остальное посчитано.",
+                        missing.join(", ")
+                    ),
+                );
+                RunTestsResult { ok: true, error: None, text }
+            }
+            // А вот чужие имена в результате — это уже разъехавшаяся
+            // нумерация: подписать её нашими именами нельзя.
+            crate::tests::Stage2::Mismatch => {
                 let _ = app.emit(
                     "test-log",
                     "Второй этап прогнал не те конфиги — результат отброшен.".to_string(),
                 );
-                return RunTestsResult {
+                RunTestsResult {
                     ok: false,
                     error: Some(
-                        "Второй этап прогнал не те конфиги: нумерация в скрипте не совпала с нашей.                          Результаты DPI сохранены, а для HTTP запусти обычный прогон."
+                        concat!(
+                            "Второй этап прогнал не те конфиги: нумерация в ",
+                            "скрипте не совпала с нашей. Результаты DPI сохранены, ",
+                            "а для HTTP запусти обычный прогон."
+                        )
                             .into(),
                     ),
                     text: dpi_text,
-                };
+                }
             }
-            RunTestsResult { ok: true, error: None, text }
-        }
+            crate::tests::Stage2::Empty => {
+                let _ = app.emit(
+                    "test-log",
+                    "Второй этап не дал ни одной строки результатов.".to_string(),
+                );
+                RunTestsResult {
+                    ok: false,
+                    error: Some(
+                        "Второй этап не дал результатов. Показаны результаты DPI.".into(),
+                    ),
+                    text: dpi_text,
+                }
+            }
+        },
         Err(e) => RunTestsResult { ok: false, error: Some(e), text: dpi_text },
     }
 }
