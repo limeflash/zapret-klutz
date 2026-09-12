@@ -76,6 +76,33 @@ pub fn latest_release() -> LatestRelease {
     }
 }
 
+/// Куда мы вообще готовы пойти за архивом.
+///
+/// Адрес приходит полем `browser_download_url` из ответа GitHub и раньше
+/// уезжал в curl как есть. Распакованное из этого архива потом запускается
+/// администратором, так что «куда сказали, туда и пошли» здесь слишком
+/// дорого стоит.
+const ASSET_HOSTS: [&str; 4] = [
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "codeload.github.com",
+];
+
+/// Только https и только к GitHub. Отдельно отсекаем `user@host`: это
+/// обычный способ увести запрос на чужой адрес, оставив знакомый на вид URL.
+pub fn download_url_allowed(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = authority.split(':').next().unwrap_or("");
+    ASSET_HOSTS.iter().any(|h| host.eq_ignore_ascii_case(h))
+}
+
 /// Куда складываем скачанные релизы — рядом с настройками приложения.
 pub fn releases_dir(app: &AppHandle) -> PathBuf {
     let dir = app.path().app_data_dir().expect("no app data dir").join("releases");
@@ -91,6 +118,12 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
     if !info.ok {
         return Err(info.error.unwrap_or_else(|| "не удалось получить релиз".into()));
     }
+    if !download_url_allowed(&info.url) {
+        return Err(format!(
+            "GitHub вернул ссылку на неожиданный адрес, скачивание отменено: {}",
+            info.url
+        ));
+    }
     let dest = releases_dir(app).join(&info.name);
 
     #[allow(unused_mut)]
@@ -99,6 +132,13 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
         "-L",
         "--fail",
         "--progress-bar",
+        // Ни сам запрос, ни редирект за ним не должны сойти на http:
+        // -L идёт по цепочке сам, и без этого её хвост мог бы оказаться
+        // открытым.
+        "--proto",
+        "=https",
+        "--proto-redir",
+        "=https",
         // Иначе зависшее после установки соединение держит нас вечно:
         // общего таймаута на закачку ставить нельзя (файл большой), а вот
         // «меньше килобайта в секунду полминуты» — верный признак смерти.
@@ -145,6 +185,26 @@ pub fn download_latest(app: &AppHandle) -> Result<PathBuf, String> {
     if !status.success() {
         let _ = fs::remove_file(&dest);
         return Err("Скачивание не удалось.".into());
+    }
+    // Размер архива известен из ответа API — сверяем. Хэша апстрим не
+    // публикует, так что подмену это не ловит; обрыв и усечение — ловит, а
+    // из этого архива потом запускается winws.exe с правами администратора.
+    if info.size > 0 {
+        match fs::metadata(&dest) {
+            Ok(m) if m.len() == info.size => {}
+            Ok(m) => {
+                let _ = fs::remove_file(&dest);
+                return Err(format!(
+                    "Размер скачанного архива не совпал с заявленным: {} байт вместо {}. Файл удалён.",
+                    m.len(),
+                    info.size
+                ));
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&dest);
+                return Err(format!("Не удалось проверить скачанный архив: {e}"));
+            }
+        }
     }
     let _ = app.emit("download-progress", 100u8);
     Ok(dest)
@@ -255,6 +315,22 @@ pub fn delete_release(app: &AppHandle, folder: &str) -> Result<(), String> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn ссылка_на_архив_принимается_только_от_github_по_https() {
+        assert!(download_url_allowed(
+            "https://github.com/Flowseal/zapret-discord-youtube/releases/download/1.9.9c/a.zip"
+        ));
+        assert!(download_url_allowed("https://objects.githubusercontent.com/x/y.zip"));
+        assert!(download_url_allowed("https://RELEASE-ASSETS.githubusercontent.com/x.zip"));
+
+        assert!(!download_url_allowed("http://github.com/x.zip"), "http не годится");
+        assert!(!download_url_allowed("https://evil.example/x.zip"));
+        assert!(!download_url_allowed("https://github.com.evil.example/x.zip"));
+        assert!(!download_url_allowed("https://github.com@evil.example/x.zip"), "user@host");
+        assert!(!download_url_allowed("ftp://github.com/x.zip"));
+        assert!(!download_url_allowed(""));
+    }
 
     #[test]
     fn процент_из_полосы_curl() {
