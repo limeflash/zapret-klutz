@@ -67,10 +67,25 @@ fn fooling_values(root: &Path, template_value: Option<&str>) -> Vec<String> {
             continue;
         }
         let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
-        for c in FOOLING.captures_iter(&text) {
-            let v = c[1].to_string();
-            if Some(v.as_str()) != template_value && !out.contains(&v) {
-                out.push(v);
+        for line in text.lines() {
+            // Комментарии и echo — не источник значений. Там лежит текст, а
+            // не то, что винвс когда-либо исполнял: взяв значение оттуда, мы
+            // бы сами перенесли его В рабочую строку.
+            let head = line.trim_start().to_lowercase();
+            if head.starts_with("rem ") || head.starts_with("::") || head.starts_with("echo ") {
+                continue;
+            }
+            for c in FOOLING.captures_iter(line) {
+                let v = c[1].to_string();
+                // Значение уезжает в .bat, который дальше исполняет cmd.
+                // Регулярка запрещает пробел и «^», но «&», «%» и скобки
+                // пропускала — а этого хватает, чтобы дописать команду.
+                if !v.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == ',' || ch == '-' || ch == '_') {
+                    continue;
+                }
+                if Some(v.as_str()) != template_value && !out.contains(&v) {
+                    out.push(v);
+                }
             }
         }
     }
@@ -300,6 +315,33 @@ mod unit_tests {
         assert!(!v.contains("--dpi-desync-fooling=ts"), "прежнее значение осталось");
         // Позиция разреза при этом не тронута: оси меняем по одной.
         assert!(v.contains("--dpi-desync-split-pos=1,midsld"), "{v}");
+    }
+
+    #[test]
+    fn значение_обмана_из_комментария_не_уезжает_в_рабочую_строку() {
+        let dir = релиз();
+        fs::write(dir.join("general.bat"), образец()).unwrap();
+        // Чужой архив: в комментарии соседнего конфига лежит значение с
+        // «&». Взяв его, мы бы сами перенесли команду В исполняемую строку.
+        let злой = [
+            "@echo off",
+            "rem --dpi-desync-fooling=x&calc",
+            "echo подсказка: --dpi-desync-fooling=y|whoami",
+            "start \"z\" /min \"%BIN%winws.exe\" --filter-tcp=443 --dpi-desync=fake --dpi-desync-fooling=md5sig",
+        ]
+        .join("\r\n");
+        fs::write(dir.join("ALT.bat"), злой).unwrap();
+
+        let made = generate(&dir, "general.bat").unwrap();
+        let обманы: Vec<&String> = made.iter().filter(|n| n.contains("обман")).collect();
+        // Из рабочей строки значение взяли, из комментариев — нет.
+        assert_eq!(обманы.len(), 1, "{обманы:?}");
+        assert!(обманы[0].contains("md5sig"), "{обманы:?}");
+        for name in &made {
+            let v = fs::read_to_string(dir.join(name)).unwrap();
+            assert!(!v.contains("fooling=x&calc"), "{name}: утекло из комментария");
+            assert!(!v.contains("fooling=y|whoami"), "{name}: утекло из echo");
+        }
     }
 
     #[test]

@@ -600,7 +600,7 @@ fn root_of(state: &State<AppState>) -> Option<PathBuf> {
 /// запасной путь запуска в winws.rs и установка службой, — а cmd разбирает
 /// свою командную строку заново: «general&calc.exe» выполнило бы вторую
 /// команду от имени администратора.
-fn checked_config(root: &Path, file_name: &str) -> Result<(), String> {
+pub fn checked_config(root: &Path, file_name: &str) -> Result<(), String> {
     // Членства в списке НЕДОСТАТОЧНО. Список читается с диска, а содержимое
     // папки задаёт архив, который пользователь мог взять где угодно. Файл с
     // именем «x&calc.bat» там вполне может лежать — и тогда cmd.exe в

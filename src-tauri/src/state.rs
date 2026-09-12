@@ -165,6 +165,8 @@ impl Drop for TestRun<'_> {
     }
 }
 
+/// Каталог данных приложения. Раньше здесь стоял `expect`, и на машине,
+/// где путь не определяется, приложение падало прямо на загрузке настроек.
 fn state_path(app: &AppHandle) -> PathBuf {
     app.path().app_data_dir().expect("no app data dir").join("state.json")
 }

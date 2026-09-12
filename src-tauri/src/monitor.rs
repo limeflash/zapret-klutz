@@ -63,6 +63,9 @@ fn is_degraded(results: &[targets::TargetResult]) -> bool {
 /// нечего: пакетные техники блок по IP не обходят в принципе. Раньше
 /// самолечение этого не знало и честно сжигало весь рейтинг, меняя стратегию
 /// заодно и для всех остальных целей.
+/// Cutoff сюда добавлен не для симметрии: этот вердикт прямо говорит, что
+/// имя уже проехало и рукопожатие состоялось, — перебирать способы это имя
+/// спрятать бессмысленно.
 fn desync_can_help(results: &[targets::TargetResult]) -> bool {
     let failed: Vec<_> = results.iter().filter(|r| !r.ok && r.verdict != PathVerdict::Server).collect();
     if failed.is_empty() {
@@ -99,6 +102,11 @@ fn tick(app: &AppHandle) {
         return;
     }
     if !winws::is_winws_running() {
+        // Обход выключен — серия самолечения кончилась вместе с ним.
+        // Без сброса накопленный список испробованного доживал до
+        // следующего запуска и приводил к преждевременному «сдалось».
+        state.healing_attempts.lock().unwrap().clear();
+        *state.heal_exhausted.lock().unwrap() = false;
         *state.last_check.lock().unwrap() = None;
         state.last_targets.lock().unwrap().clear();
         *state.last_check_at.lock().unwrap() = 0;
@@ -153,6 +161,13 @@ fn tick(app: &AppHandle) {
     *state.last_targets.lock().unwrap() = results.iter().map(|r| (r.name.clone(), r.ok, r.ms)).collect();
     *state.last_check_at.lock().unwrap() = now_ms();
     crate::tray::refresh(app);
+
+    // Результат, снятый при ДРУГОЙ стратегии, не повод менять нынешнюю.
+    // Проверка уже была, но пользовалась ею только запись «эта работает»;
+    // само переключение шло и на чужих данных.
+    if !attributable {
+        return;
+    }
 
     let degraded = is_degraded(&results);
     if !degraded {
@@ -409,11 +424,11 @@ pub fn apply_config(app: &AppHandle, name: &str) -> Result<(), String> {
         (p.root_path.clone(), p.installed_as_service)
     };
     let root = std::path::PathBuf::from(root.ok_or("Сначала загрузи релиз zapret.")?);
-    // Ровно один из показанных конфигов, а не любой существующий путь:
-    // дальше имя уезжает в cmd /c, который разбирает строку заново.
-    if !crate::release::list_configs(&root).iter().any(|c| c == name) {
-        return Err(format!("Нет файла {name} в папке релиза."));
-    }
+    // Та же проверка, что делает кнопка в окне. Раньше здесь стояло только
+    // членство в списке — а через эту функцию идут самолечение и трей, то
+    // есть ровно те пути, где человек имя не набирал и глазами не видел.
+    // Список читается с диска, и что в нём лежит, задаёт чужой архив.
+    crate::commands::checked_config(&root, name)?;
     if as_service {
         crate::service::install_service(&root, name).map_err(|e| e.to_string())?;
     } else {

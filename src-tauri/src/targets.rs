@@ -97,7 +97,12 @@ fn probe_target(t: &Target) -> TargetResult {
         for ip in &ips {
             main = http_probe_pinned(&t.host, t.port, Some(ip), 4);
             used = Some(ip.clone());
-            if main.ok {
+            // Останавливаемся не только на успехе. Сертификат и 451 — это
+            // тоже ОТВЕТ сервера, и он доказательнее, чем молчание
+            // следующего edge. Раньше перебор шёл дальше и затирал такой
+            // ответ таймаутом, а вердикт из «сервер жив» превращался в
+            // «режут адрес».
+            if main.ok || main.code.server_reachable() || main.code == FailureCode::HttpBlocked {
                 break;
             }
         }

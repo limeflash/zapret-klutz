@@ -65,8 +65,12 @@ impl FailureCode {
     /// Нужен ли контрольный замер. Лишнее рукопожатие платим только там,
     /// где оно что-то решает: имя ушло на провод, а ответа не было.
     pub fn needs_control(self) -> bool {
+        // Ok, Cutoff и 451 контролем не уточняются: в первом случае нечего
+        // выяснять, во втором имя уже проехало, в третьем блокировка
+        // объявлена прямым текстом. Лишнее рукопожатие за них не платим.
         self != FailureCode::Ok
             && self != FailureCode::Cutoff
+            && self != FailureCode::HttpBlocked
             && self.reached_tls()
             && !self.server_reachable()
     }
@@ -187,6 +191,15 @@ pub fn classify_path(
             "контрольный замер не выполнялся — где именно режут, неизвестно".into(),
         );
     };
+    // «Не смогли измерить» — это не «адрес молчит». Unknown у контроля
+    // означает, что curl не запустился или ответил непонятным, и делать из
+    // этого вывод о блокировке нельзя.
+    if control_code == FailureCode::Unknown {
+        return (
+            PathVerdict::Unknown,
+            "контрольный замер не удался — где именно режут, осталось неизвестным".into(),
+        );
+    }
     if control_ok || control_code.server_reachable() {
         (
             PathVerdict::Sni,
@@ -231,6 +244,18 @@ pub struct ProbeResult {
 /// 200. Для этого нужен разбор тела или сертификата, а не код ответа.
 pub fn code_is_answer(code: u16) -> bool {
     code >= 100 && code != 451
+}
+
+/// Прибиваем curl к прямому соединению. Иначе прокси из окружения или из
+/// пользовательского `.curlrc` тихо подменяет то, что мы меряем.
+fn no_proxy(cmd: &mut Command) {
+    cmd.arg("--noproxy").arg("*").arg("-q");
+    for var in [
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    ] {
+        cmd.env_remove(var);
+    }
 }
 
 /// Коды выхода curl — стабильная и документированная таблица, так что
@@ -300,6 +325,10 @@ pub fn http_probe_pinned(host: &str, port: u16, pin_ip: Option<&str>, timeout_se
 
     #[allow(unused_mut)]
     let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
+    // Окружение наследуется от того, кто нас запустил. Заданный там
+    // HTTPS_PROXY увёл бы запрос через прокси, и мерили бы мы прокси, а не
+    // путь до цели: вердикт «режут по имени» стал бы выдумкой.
+    no_proxy(&mut cmd);
     cmd.args(["-s", "-o", "NUL", "-w", "%{http_code}", "-m", &timeout_sec.to_string()]);
     if let Some(ip) = pin_ip {
         cmd.args(["--resolve", &format!("{host}:{port}:{ip}")]);
@@ -419,6 +448,7 @@ pub fn http_probe_volume(
 
     #[allow(unused_mut)]
     let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
+    no_proxy(&mut cmd);
     cmd.args([
         "-s",
         "-o",
@@ -627,6 +657,27 @@ mod unit_tests {
         let (v, why) = classify_path(false, FailureCode::TlsFailed, None);
         assert_eq!(v, PathVerdict::Unknown);
         assert!(why.contains("не выполнялся"), "{why}");
+    }
+
+    #[test]
+    fn неудавшийся_контроль_это_не_блок_по_адресу() {
+        // Контроль не измерился (curl не запустился, ответил непонятным) —
+        // это «неизвестно», а не «адрес молчит». Раньше любой контроль,
+        // кроме успеха и сертификата, давал уверенное «режут адрес».
+        let (v, why) = classify_path(false, FailureCode::TlsFailed, Some((false, FailureCode::Unknown)));
+        assert_eq!(v, PathVerdict::Unknown, "{why}");
+        assert!(why.contains("не удался"), "{why}");
+    }
+
+    #[test]
+    fn за_451_контроль_не_платим() {
+        // Блокировка объявлена прямым текстом — уточнять нечего.
+        assert!(!FailureCode::HttpBlocked.needs_control());
+        assert!(!FailureCode::Cutoff.needs_control());
+        assert!(!FailureCode::Ok.needs_control());
+        // А вот обрыв TLS без ответа уточнять надо.
+        assert!(FailureCode::TlsFailed.needs_control());
+        assert!(FailureCode::Timeout.needs_control());
     }
 
     #[test]

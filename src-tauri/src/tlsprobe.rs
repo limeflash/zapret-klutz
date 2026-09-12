@@ -349,6 +349,16 @@ pub fn aggregate(verdicts: &[FragVerdict]) -> (FragVerdict, String) {
                 .into(),
         );
     }
+    // «Не пробивает ни одну» можно говорить, только если по каждой цели
+    // измерение было. Одна неизмеренная — и утверждение уже шире данных.
+    if verdicts.contains(&DoesNotHelp) && verdicts.contains(&Inconclusive) {
+        return (
+            Inconclusive,
+            "по части целей разрез не пробил, по остальным измерить не вышло — \
+             общего вывода нет"
+                .into(),
+        );
+    }
     if verdicts.contains(&DoesNotHelp) {
         return (
             DoesNotHelp,
@@ -693,7 +703,13 @@ pub fn probe_tls13_block(
     let answered12 = if answered13 {
         true
     } else {
-        handshake_probe(ip, port, sni, true, timeout).0.server_hello
+        // Именно завершённое рукопожатие, а не один ServerHello. Иначе
+        // сервер, который ответил на 1.2 и тут же оборвался, объявлял бы
+        // 1.3 заблокированным — хотя оборвались обе версии.
+        {
+            let seen = handshake_probe(ip, port, sni, true, timeout).0;
+            seen.server_hello && seen.done
+        }
     };
     classify_tls13(answered13, seen13.tls13, answered12)
 }
@@ -789,6 +805,19 @@ mod unit_tests {
             let (v, _) = classify_frag(w, s);
             assert_eq!(v, FragVerdict::Inconclusive);
         }
+    }
+
+    #[test]
+    fn одна_неизмеренная_цель_снимает_общий_приговор() {
+        use FragVerdict::*;
+        // «Не пробивает НИ ОДНУ» — утверждение про все цели. Если по одной
+        // измерения не было, оно шире данных.
+        let (v, why) = aggregate(&[DoesNotHelp, Inconclusive]);
+        assert_eq!(v, Inconclusive, "{why}");
+        assert!(why.contains("общего вывода нет"), "{why}");
+        // А когда измерены все — приговор остаётся.
+        assert_eq!(aggregate(&[DoesNotHelp, NotBlocked]).0, DoesNotHelp);
+        assert_eq!(aggregate(&[DoesNotHelp, DoesNotHelp]).0, DoesNotHelp);
     }
 
     #[test]
