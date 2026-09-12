@@ -1474,7 +1474,10 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
   height: 26px;
   flex: 0 0 auto;
   border-radius: 7px;
-  background: var(--pill);
+  /* background-color, а не сокращённое background: сокращённая запись
+     сбрасывает size/position/repeat, а в этой ячейке лежит иконка сервиса,
+     которой они и задают размер. */
+  background-color: var(--pill);
   border: 1px solid var(--line);
   display: flex;
   align-items: center;
@@ -1482,16 +1485,19 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
   font-size: 13px;
   font-weight: 700;
   color: var(--tx-3);
+  /* Геометрия фона живёт здесь, а не только в .has-icon: у правила для
+     выделенной строки специфичность выше, и его сокращённый background
+     обнулял размер — иконка разворачивалась во всю ячейку от угла. */
+  background-size: 16px 16px;
+  background-position: center;
+  background-repeat: no-repeat;
 }
-.cmd-item.active .cmd-initial { background: var(--raised); }
+.cmd-item.active .cmd-initial { background-color: var(--raised); }
 /* Настоящая иконка сервиса вместо буквы. Фоном, а не <img>: подложка и
    рамка остаются от заглушки, а разномастные favicon — от квадратных
    до узких — вписываются в один размер без рывка вёрстки. */
 .cmd-initial.has-icon {
   background-color: var(--raised);
-  background-size: 16px 16px;
-  background-position: center;
-  background-repeat: no-repeat;
 }
 .cmd-item-text { min-width: 0; flex: 1; }
 .cmd-item-name { font-size: 14.5px; color: var(--tx); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
