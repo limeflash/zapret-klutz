@@ -403,6 +403,82 @@ pub fn describe(running: bool, found: usize, ticks: u32) -> String {
     )
 }
 
+// ─────────── сети оператора ───────────
+//
+// Пойманный адрес — один сервер из пула, и /24 вокруг него покрывает лишь
+// соседей по стойке. У Riot объявлено 36 сетей, у Valve 45, и матч может
+// уехать в любую: за два сбора подряд на Valorant поймались 162.249.72.0/24
+// и 185.40.64.0/24 — разные сети одного оператора. Поэтому спрашиваем, чьи
+// это адреса, и берём все его сети сразу.
+
+/// Порог, выше которого оператор считается облаком, а не игровым.
+///
+/// Взято из замеров, а не с потолка: Riot объявляет 36 сетей, Valve — 45.
+/// А Cloudflare 2395, Google 1233, Amazon 18020. Разница на два порядка,
+/// и порог посередине разделяет их надёжнее любого списка имён — который
+/// к тому же устарел бы на первом же операторе, о котором мы не слышали.
+///
+/// Зачем порог вообще: втащить в список тысячи сетей Cloudflare значило бы
+/// направить обход на пол-интернета. Для игрового профиля это верный способ
+/// сломать всё разом.
+pub const MAX_OPERATOR_PREFIXES: usize = 256;
+
+/// Стоит ли разворачивать адрес в сети оператора.
+pub fn should_expand(prefix_count: usize) -> bool {
+    prefix_count > 0 && prefix_count <= MAX_OPERATOR_PREFIXES
+}
+
+/// Номер оператора из ответа справочника о сети.
+pub fn parse_asn(json: &str) -> Option<String> {
+    let at = json.find("\"asns\"")?;
+    let rest = &json[at..];
+    let start = rest.find('[')?;
+    let end = rest.find(']')?;
+    rest[start + 1..end]
+        .split(',')
+        .next()?
+        .trim()
+        .trim_matches('"')
+        .parse::<u32>()
+        .ok()
+        .map(|n| n.to_string())
+}
+
+/// Сети IPv4 из ответа справочника о префиксах оператора.
+pub fn parse_prefixes(json: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in json.split("\"prefix\"").skip(1) {
+        let Some(start) = part.find('"') else { continue };
+        let rest = &part[start + 1..];
+        let Some(end) = rest.find('"') else { continue };
+        let p = &rest[..end];
+        // Только IPv4 и только похожее на сеть.
+        if !p.contains(':') && p.contains('/') && p.split('.').count() == 4 && !out.contains(&p.to_string()) {
+            out.push(p.to_string());
+        }
+    }
+    out
+}
+
+/// Сети оператора, которому принадлежит адрес. `None` — выяснить не вышло
+/// или оператор оказался облаком.
+///
+/// Best-effort целиком: любая осечка возвращает `None`, и вызывающий просто
+/// оставляет /24. Сеть тут не обязана быть — сбор работает и без неё.
+pub fn operator_prefixes(ip: &str) -> Option<Vec<String>> {
+    let info = crate::maintenance::http_get(&format!(
+        "https://stat.ripe.net/data/network-info/data.json?resource={ip}"
+    ))
+    .ok()?;
+    let asn = parse_asn(&info)?;
+    let list = crate::maintenance::http_get(&format!(
+        "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+    ))
+    .ok()?;
+    let pfx = parse_prefixes(&list);
+    should_expand(pfx.len()).then_some(pfx)
+}
+
 /// Адрес сервера — это один из пула, а не единственный.
 ///
 /// Матч подключается к ОДНОМУ серверу: за полминуты сбора их и набирается
@@ -469,7 +545,15 @@ pub fn save_ips_to(
     // отдельно меню, отдельно матч, отдельно голосовой чат.
     let mut all: BTreeSet<String> = extract_block(&existing).into_iter().collect();
     for a in addrs {
-        all.insert(to_subnet(a));
+        // Сети оператора, если удалось выяснить; иначе /24 вокруг адреса.
+        // Один адрес одного оператора спрашиваем один раз: у пойманных
+        // адресов оператор обычно общий.
+        match operator_prefixes(a) {
+            Some(pfx) => all.extend(pfx),
+            None => {
+                all.insert(to_subnet(a));
+            }
+        }
     }
     let all: Vec<String> = all.into_iter().collect();
     let merged = merge_block(&existing, &all);
@@ -1125,6 +1209,60 @@ mod unit_tests {
     /// Cargo гоняет их параллельно, и без этого замка они отбирали бы
     /// накопленное друг у друга — тест мигал бы через раз.
     static ТЕСТ_КОПИЛКИ: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Живая проверка цепочки: адрес -> оператор -> все его сети.
+    /// cargo test -- --ignored живой_оператор --nocapture
+    #[test]
+    #[ignore]
+    fn живой_оператор_по_адресу() {
+        // Пойманные на этой машине адреса Riot и Valve.
+        for ip in ["185.40.64.5", "162.249.72.10", "146.66.155.73"] {
+            let got = operator_prefixes(ip);
+            println!("{ip}: {:?} сетей", got.as_ref().map(|v| v.len()));
+            let pfx = got.unwrap_or_else(|| panic!("{ip}: оператор не определился"));
+            assert!(!pfx.is_empty());
+            assert!(pfx.iter().all(|p| p.contains('/')));
+        }
+        // А облако разворачивать нельзя — у него тысячи сетей.
+        let cf = operator_prefixes("104.29.153.1");
+        println!("Cloudflare: {:?}", cf.as_ref().map(|v| v.len()));
+        assert!(cf.is_none(), "облако не должно разворачиваться");
+    }
+
+    #[test]
+    fn облако_целиком_в_список_не_тащим() {
+        // Замерено: Riot объявляет 36 сетей, Valve 45 — их берём целиком.
+        assert!(should_expand(36), "Riot");
+        assert!(should_expand(45), "Valve");
+        // А Cloudflare 2395, Google 1233, Amazon 18020 — это облака, и
+        // затащить их в игровой список значит направить обход на
+        // пол-интернета.
+        assert!(!should_expand(2395), "Cloudflare");
+        assert!(!should_expand(1233), "Google");
+        assert!(!should_expand(18020), "Amazon");
+        // Пустой ответ — не повод ничего разворачивать.
+        assert!(!should_expand(0));
+    }
+
+    #[test]
+    fn разбор_ответов_справочника() {
+        // Форма ответа про сеть.
+        let j = r#"{"data":{"prefix":"185.40.64.0/24","asns":["6507"]}}"#;
+        assert_eq!(parse_asn(j).as_deref(), Some("6507"));
+        // Несколько операторов — берём первого.
+        let j2 = r#"{"data":{"asns":["32590","1234"]}}"#;
+        assert_eq!(parse_asn(j2).as_deref(), Some("32590"));
+        // Мусор не должен ломать.
+        assert_eq!(parse_asn("{}"), None);
+        assert_eq!(parse_asn(""), None);
+        assert_eq!(parse_asn(r#"{"asns":[]}"#), None);
+
+        // Форма ответа про сети оператора.
+        let p = r#"{"data":{"prefixes":[{"prefix":"162.249.72.0/21"},{"prefix":"2a04::/32"},{"prefix":"185.40.64.0/24"},{"prefix":"162.249.72.0/21"}]}}"#;
+        let got = parse_prefixes(p);
+        assert_eq!(got, vec!["162.249.72.0/21", "185.40.64.0/24"], "IPv6 и повторы отсеяны");
+        assert!(parse_prefixes("{}").is_empty());
+    }
 
     #[test]
     fn адрес_расширяется_до_подсети() {
