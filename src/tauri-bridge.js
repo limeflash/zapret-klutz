@@ -100,6 +100,7 @@
     clearGameIps: () => invoke('clear_game_ips'),
     excludeGameIps: () => invoke('exclude_game_ips'),
     removeGameIps: (addrs) => invoke('remove_game_ips', { addrs }),
+    identifyGameGroup: (nets) => invoke('identify_game_group', { nets }),
     getExtraStrategies: () => invoke('get_extra_strategies'),
     generateExtraStrategies: (template) => invoke('generate_extra_strategies', { template: template || null }),
     removeExtraStrategies: () => invoke('remove_extra_strategies'),

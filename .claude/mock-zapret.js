@@ -172,7 +172,7 @@
             '185.25.180.0/23', '190.217.33.0/24', '205.196.6.0/24',
           ],
         },
-        { asn: '', name: '', at: 0, nets: ['1.2.3.0/24'] },
+        { asn: '', name: '', at: 0, legacy: true, nets: ['1.2.3.0/24'] },
       ],
       skipped: [
         { addr: '104.29.153.1', asn: '13335', name: 'Cloudflare, Inc.', prefixes: 2395 },
@@ -202,6 +202,7 @@
     clearGameIps: noop,
     excludeGameIps: noop,
     removeGameIps: async () => ({ ok: true }),
+    identifyGameGroup: async () => ({ ok: true }),
     getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
     generateExtraStrategies: noop,
     removeExtraStrategies: noop,

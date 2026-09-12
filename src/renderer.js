@@ -2755,14 +2755,21 @@ function renderGameGroups(groups) {
             const key = gameGroupKey(g, i);
             const open = gameOpen.has(key);
             const nets = gameAll.has(key) ? g.nets : g.nets.slice(0, СЕТЕЙ_СРАЗУ);
-            const имя = g.name || (g.asn ? `AS${g.asn}` : 'Оператор не определён');
+            const имя =
+                g.name ||
+                (g.asn ? `AS${g.asn}` : g.legacy ? 'Оператор не сохранён' : 'Оператор не определён');
             const счёт = `${g.nets.length} ${plural(g.nets.length, 'сеть', 'сети', 'сетей')}`;
             // Про «развёрнуты из одного адреса» говорим только там, где это
             // правда: у безымянной группы оператора нет, есть сеть вокруг
             // самого адреса.
+            // Три разных случая, и путать их нельзя: у старых списков
+            // оператора не спрашивали вовсе, и говорить про сеть вокруг
+            // адреса там неправда — это объявленные сети оператора.
             const откуда = g.asn
                 ? ' · развёрнуты из одного пойманного адреса'
-                : ' · сеть вокруг пойманного адреса';
+                : g.legacy
+                  ? ' · из списка прежней версии'
+                  : ' · сеть вокруг пойманного адреса';
             const строки = open
                 ? nets
                       .map(
@@ -2785,6 +2792,9 @@ function renderGameGroups(groups) {
                 `<span class="game-group-meta">${счёт}${откуда}</span>` +
                 '</div>' +
                 '<div class="game-group-right">' +
+                (g.legacy
+                    ? `<button class="btn-link" data-identify="${esc(key)}">Определить</button>`
+                    : '') +
                 `<span class="game-when">${esc(gameWhen(g.at))}</span>` +
                 `<button class="addr-remove-btn" data-group-remove="${esc(key)}" title="Убрать все сети этого оператора">${X_SVG}</button>` +
                 '</div></div>' +
@@ -2866,6 +2876,18 @@ $('gameGroups').onclick = async (e) => {
         const res = await window.zapret.removeGameIps(g.nets);
         await loadGames();
         if (!res.ok) gameMsg(res.error || 'Не удалось убрать.');
+        return;
+    }
+    const ident = e.target.closest('[data-identify]');
+    if (ident) {
+        e.stopPropagation();
+        const g = (gameState?.groups || []).find((x, i) => gameGroupKey(x, i) === ident.dataset.identify);
+        if (!g) return;
+        ident.disabled = true;
+        ident.textContent = 'Спрашиваю…';
+        const res = await window.zapret.identifyGameGroup(g.nets);
+        await loadGames();
+        if (!res.ok) gameMsg(res.error || 'Не удалось определить оператора.');
         return;
     }
     const more = e.target.closest('[data-all]');

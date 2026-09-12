@@ -518,7 +518,7 @@ pub fn parse_holder(json: &str) -> Option<String> {
 }
 
 /// Как зовут оператора. Пусто — справочник промолчал, обойдёмся номером.
-fn holder_of(asn: &str) -> String {
+pub fn holder_of(asn: &str) -> String {
     crate::maintenance::http_get(&format!(
         "https://stat.ripe.net/data/as-overview/data.json?resource=AS{asn}"
     ))
@@ -670,6 +670,15 @@ pub fn changed_at(root: &std::path::Path, target: Target) -> Option<u64> {
     Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
+/// Делит сети на те, что оператор объявляет, и все остальные.
+///
+/// Сверяем строкой, а не арифметикой по маске: сети в списке и взялись из
+/// того же самого ответа справочника, поэтому совпадают дословно. Чужое
+/// остаётся непривязанным — приписать его оператору было бы враньём.
+pub fn partition_by(nets: &[String], announced: &[String]) -> (Vec<String>, Vec<String>) {
+    nets.iter().cloned().partition(|n| announced.contains(n))
+}
+
 /// Добавляет группу к уже собранным.
 ///
 /// Сеть, которая где-то уже лежит, второй раз не кладётся, а группа того же
@@ -693,7 +702,35 @@ fn добавить_группу(groups: &mut Vec<Group>, asn: String, name: Str
         }
         return;
     }
-    groups.push(Group { asn, name, at, nets: свежие });
+    groups.push(Group { asn, name, at, nets: свежие, legacy: false });
+}
+
+/// Подписывает набор сетей оператором, не меняя сам список.
+///
+/// Сети переезжают из безымянной группы в именованную. Всё, чего оператор
+/// не объявляет, остаётся где лежало: приписать ему чужое было бы враньём.
+///
+/// Состав списка при этом не меняется — добавляются только строки-подписи,
+/// поэтому перезапускать winws не нужно.
+pub fn attribute(
+    root: &std::path::Path,
+    сети: &[String],
+    asn: &str,
+    name: &str,
+) -> Result<(), String> {
+    let list = root.join("lists").join(Target::Bypass.file());
+    let existing = std::fs::read_to_string(&list).map_err(|e| e.to_string())?;
+    let (mut groups, skipped) = parse_groups(&existing);
+    for g in groups.iter_mut() {
+        g.nets.retain(|n| !сети.contains(n));
+    }
+    groups.retain(|g| !g.nets.is_empty());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    добавить_группу(&mut groups, asn.to_string(), name.to_string(), now, сети.to_vec());
+    std::fs::write(&list, merge_groups(&existing, &groups, &skipped)).map_err(|e| e.to_string())
 }
 
 /// Кладёт собранные адреса в список релиза, не тронув чужие строки.
@@ -1002,6 +1039,12 @@ pub struct Group {
     /// Когда собрана, миллисекунды эпохи. 0 — неизвестно.
     pub at: u64,
     pub nets: Vec<String>,
+    /// Сети лежали в файле без строки-маркера — так писала версия, где
+    /// групп ещё не было. Это ВАЖНО отличать от «справочник промолчал»:
+    /// там мы спрашивали и не узнали, а здесь не спрашивали вовсе, и
+    /// сказать про такие сети «сеть вокруг пойманного адреса» — неправда.
+    /// Выяснить оператора для них можно в любой момент, двумя запросами.
+    pub legacy: bool,
 }
 
 /// Адрес, который в список не пошёл.
@@ -1040,7 +1083,7 @@ pub fn parse_groups(text: &str) -> (Vec<Group>, Vec<Skipped>) {
             let asn = it.next().unwrap_or("").trim_start_matches("AS").to_string();
             let at = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             let name = it.next().unwrap_or("").trim().to_string();
-            groups.push(Group { asn, name, at, nets: Vec::new() });
+            groups.push(Group { asn, name, at, nets: Vec::new(), legacy: false });
             continue;
         }
         if let Some(rest) = t.strip_prefix(SKIP_TAG) {
@@ -1060,7 +1103,11 @@ pub fn parse_groups(text: &str) -> (Vec<Group>, Vec<Skipped>) {
         }
         match groups.last_mut() {
             Some(g) => g.nets.push(t.to_string()),
-            None => groups.push(Group { nets: vec![t.to_string()], ..Default::default() }),
+            None => groups.push(Group {
+                nets: vec![t.to_string()],
+                legacy: true,
+                ..Default::default()
+            }),
         }
     }
     groups.retain(|g| !g.nets.is_empty());
@@ -1093,7 +1140,17 @@ pub fn merge_groups(existing: &str, groups: &[Group], skipped: &[Skipped]) -> St
         out.push_str(EMPTY_STUB);
         out.push_str("\r\n");
     }
-    for g in groups.iter().filter(|g| !g.nets.is_empty()) {
+    // Сети без оператора идут первыми и БЕЗ строки-маркера: разбор
+    // относит к безымянной группе всё, что лежит до первого маркера.
+    // Припиши мы им маркер — они стали бы неотличимы от групп, где
+    // оператора спрашивали и не узнали.
+    for g in groups.iter().filter(|g| g.legacy && !g.nets.is_empty()) {
+        for n in &g.nets {
+            out.push_str(n);
+            out.push_str("\r\n");
+        }
+    }
+    for g in groups.iter().filter(|g| !g.legacy && !g.nets.is_empty()) {
         out.push_str(&format!("{GROUP_TAG}AS{} {} {}", g.asn, g.at, g.name));
         out.push_str("\r\n");
         for n in &g.nets {
@@ -1582,8 +1639,15 @@ mod unit_tests {
                 name: "Riot Games, Inc".into(),
                 at: 1_757_712_345_000,
                 nets: vec!["162.249.72.0/21".into(), "185.40.64.0/22".into()],
+                legacy: false,
             },
-            Group { asn: String::new(), name: String::new(), at: 0, nets: vec!["1.2.3.0/24".into()] },
+            Group {
+                asn: String::new(),
+                name: String::new(),
+                at: 0,
+                nets: vec!["1.2.3.0/24".into()],
+                legacy: false,
+            },
         ];
         let skipped = vec![Skipped {
             addr: "104.29.153.1".into(),
@@ -1603,6 +1667,49 @@ mod unit_tests {
         let (назад, пропуск) = parse_groups(&текст);
         assert_eq!(назад, groups, "группы вернулись как были");
         assert_eq!(пропуск, skipped, "пропущенное вернулось как было");
+    }
+
+    #[test]
+    fn старый_список_отличается_от_неузнанного_оператора() {
+        // Файл прежней версии: сети лежат сразу под заголовком блока, без
+        // строки-маркера. Оператор там не «не определился» — его никогда и
+        // не спрашивали, и подпись про сеть вокруг адреса для них ложь.
+        let старый = [BLOCK_START, "103.219.128.0/22", "185.40.64.0/22", BLOCK_END].join("\r\n");
+        let (g, _) = parse_groups(&старый);
+        assert_eq!(g.len(), 1);
+        assert!(g[0].legacy, "нет маркера — значит запись прежней версии");
+        assert_eq!(g[0].nets.len(), 2);
+
+        // Признак обязан пережить перезапись файла: иначе после первой же
+        // правки списка эти сети станут неотличимы от неузнанных.
+        let снова = merge_groups("", &g, &[]);
+        assert!(!снова.contains(GROUP_TAG), "маркера у таких сетей быть не должно");
+        assert!(parse_groups(&снова).0[0].legacy, "признак потерян");
+
+        // А группа, записанная нами, маркер имеет и старой не считается.
+        let наша = vec![Group {
+            asn: "6507".into(),
+            name: "Riot Games, Inc".into(),
+            at: 1,
+            nets: vec!["1.2.3.0/24".into()],
+            legacy: false,
+        }];
+        assert!(!parse_groups(&merge_groups("", &наша, &[])).0[0].legacy);
+    }
+
+    #[test]
+    fn чужую_сеть_оператору_не_приписываем() {
+        // Определяем оператора по одной сети, но подписать им можно только
+        // то, что он действительно объявляет.
+        let наши = vec![
+            "103.219.128.0/22".to_string(),
+            "185.40.64.0/22".to_string(),
+            "8.8.8.0/24".to_string(),
+        ];
+        let объявлено = vec!["103.219.128.0/22".to_string(), "185.40.64.0/22".to_string()];
+        let (его, чужие) = partition_by(&наши, &объявлено);
+        assert_eq!(его, ["103.219.128.0/22", "185.40.64.0/22"]);
+        assert_eq!(чужие, ["8.8.8.0/24"], "чужое остаётся непривязанным");
     }
 
     #[test]

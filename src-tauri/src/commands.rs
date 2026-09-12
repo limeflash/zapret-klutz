@@ -1559,6 +1559,45 @@ pub fn get_game_scan(state: State<AppState>) -> GameScanState {
     }
 }
 
+/// Выясняет, чей это набор сетей, и подписывает его оператором.
+///
+/// Нужно для списков, записанных прежней версией: там сети лежат без
+/// оператора, и страница честно показывает «оператор не сохранён».
+/// Заставлять ради этого играть ещё один матч незачем — хватает двух
+/// запросов: номер оператора по одной сети, затем его объявленные сети.
+///
+/// Сам список при этом не меняется: добавляются только подписи, поэтому
+/// перезапускать обход не надо.
+#[tauri::command(async)]
+pub fn identify_game_group(state: State<AppState>, nets: Vec<String>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    let Some(первая) = nets.first() else {
+        return err("Нечего определять.");
+    };
+    let (asn, объявлено) = match crate::gamescan::operator_of(первая) {
+        crate::gamescan::Operator::Nets { asn, nets } => (asn, nets),
+        crate::gamescan::Operator::Cloud { asn, prefixes } => {
+            return err(format!(
+                "Это облако AS{asn}, у него {prefixes} сетей. Игровым оператором оно не бывает."
+            ))
+        }
+        crate::gamescan::Operator::Unknown => {
+            return err("Справочник не ответил. Проверь связь и попробуй ещё раз.")
+        }
+    };
+    let (его, _чужие) = crate::gamescan::partition_by(&nets, &объявлено);
+    if его.is_empty() {
+        return err("Ни одна сеть из этих оператору не принадлежит.");
+    }
+    let name = crate::gamescan::holder_of(&asn);
+    match crate::gamescan::attribute(&root, &его, &asn, &name) {
+        Ok(()) => ok(),
+        Err(e) => err(e),
+    }
+}
+
 /// Убирает из списка перечисленные сети.
 ///
 /// Сбор берёт адреса пачкой и иногда прихватывает чужое — облачный адрес,
