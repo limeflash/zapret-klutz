@@ -1676,9 +1676,11 @@ pub fn scan_game_from_log(
             addrs.len()
         )
     };
+    // Перезапуск здесь один. Раньше их было два подряд: один чтобы снять
+    // --debug, второй после записи адресов. Первый успевал поднять обход со
+    // старым списком, и он же лишний раз рвал связь.
     if !addrs.is_empty() {
         crate::gamescan::save_ips(&root, &addrs)?;
-        let _ = crate::monitor::apply_config(&app, &active);
     }
     Ok(crate::gamescan::ScanResult {
         // Именно проверка, а не «раз дошли сюда, значит работает»: winws мог
@@ -1725,14 +1727,23 @@ pub fn exclude_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult 
 }
 
 #[tauri::command(async)]
-pub fn clear_game_ips(state: State<AppState>) -> SimpleResult {
+pub fn clear_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult {
     let Some(root) = root_of(&state) else {
         return err("Сначала загрузи релиз zapret.");
     };
-    match crate::gamescan::clear_ips(&root) {
-        Ok(()) => ok(),
-        Err(e) => err(e),
+    if let Err(e) = crate::gamescan::clear_ips(&root) {
+        return err(e);
     }
+    // Без перезапуска winws продолжает работать со СТАРЫМ списком: файл
+    // очищен, а в памяти адреса остались. Человек жмёт «Убрать», видит
+    // пустой список и не понимает, почему ничего не изменилось.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    ok()
 }
 
 // ─────────── Дополнительные стратегии ───────────
