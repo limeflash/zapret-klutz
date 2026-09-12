@@ -1061,7 +1061,7 @@ html[data-theme="dark"] .dz-icon img.logo-dark { display: block; }
 /* Строка цели */
 .trow {
   display: grid;
-  grid-template-columns: 160px 1fr 90px 90px;
+  grid-template-columns: 160px 1fr 90px 120px;
   align-items: center;
   gap: 14px;
   padding: 11px 20px;
@@ -1077,7 +1077,7 @@ html[data-theme="dark"] .dz-icon img.logo-dark { display: block; }
 .tr-dot.idle { background: var(--tx-6); }
 .tr-host { color: var(--tx-5); font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tr-ms { color: var(--tx-3); text-align: right; font-variant-numeric: tabular-nums; }
-.tr-verdict { text-align: right; font-weight: 600; font-size: 13.5px; color: var(--green); }
+.tr-verdict { text-align: right; font-weight: 600; font-size: 13.5px; color: var(--green); white-space: nowrap; }
 .tr-verdict.warn { color: var(--amber); }
 .tr-verdict.bad  { color: var(--red-row); }
 

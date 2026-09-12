@@ -76,10 +76,10 @@
     // существовать: renderer подписывается на него при загрузке, и без
     // заглушки весь скрипт падал бы на TypeError.
     onFileDrop: () => () => {},
-    getVersions: async () => ({ app: '1.1.0', zapret: '1.9.9c', tgws: '1.10.2' }),
-    checkKlutzUpdate: async () => ({ current: '1.1.0', latest: '1.2.0', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' }),
+    getVersions: async () => ({ app: '1.2.3', zapret: '1.9.9c', tgws: '1.10.2' }),
+    checkKlutzUpdate: async () => ({ current: '1.2.3', latest: '1.2.4', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' }),
     checkComponentUpdates: async () => ({
-      klutz: { current: '1.1.0', latest: '1.1.0', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' },
+      klutz: { current: '1.2.3', latest: '1.2.3', error: null, url: 'https://github.com/vbu00/zapret-klutz/releases/latest' },
       zapret: { current: '1.9.9c', latest: '1.9.9c', error: null },
       tgws: { current: '1.10.2', latest: '1.10.2', error: null },
     }),

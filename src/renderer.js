@@ -426,6 +426,11 @@ function renderSimpleHero(state, check, running) {
         : 'Работает, но не всё отвечает'
       : 'Обход выключен';
 
+  // Совет в простом режиме тот же, что и в подробном: если известно, что режут
+  // адрес или отказывает сам сервер, «подберите другой вариант» — вредный
+  // совет, перебор там ничего не даст.
+  const note = check ? pathNote(check.targets) : '';
+
   $('simpleSub').textContent =
     state === 'picking'
       ? $('heroPickStatus').textContent
@@ -433,9 +438,10 @@ function renderSimpleHero(state, check, running) {
       ? `${activeName} · работает ${formatUptime(currentState.startedAt)}`
       : state === 'failed'
       ? `Включён лучший из проверенных — ${activeName}, но Discord и YouTube не отвечают. ` +
-        'Прогоните тесты ещё раз или попробуйте другой вариант.'
+        (note || 'Прогоните тесты ещё раз или попробуйте другой вариант.')
       : state === 'degraded'
-      ? `Включён ${activeName}, отвечают ${check.ok} из ${check.total} целей. Попробуйте подобрать другой вариант.`
+      ? `Включён ${activeName}, отвечают ${check.ok} из ${check.total} целей. ` +
+        (note || 'Попробуйте подобрать другой вариант.')
       : lastTestBest
       ? `Включится последний рабочий вариант — ${displayName(lastTestBest)}. Пара секунд, без подбора.`
       : 'Klutz проверит варианты обхода и включит тот, с которым Discord и YouTube откроются. Займёт пару минут.';
