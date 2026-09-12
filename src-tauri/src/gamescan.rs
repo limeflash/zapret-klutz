@@ -398,11 +398,11 @@ pub fn save_ips(root: &std::path::Path, addrs: &[String]) -> Result<usize, Strin
     Ok(all.len())
 }
 
-/// Сколько наших адресов сейчас в списке.
-pub fn saved_count(root: &std::path::Path) -> usize {
+/// Какие наши адреса сейчас в списке.
+pub fn saved_ips(root: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(root.join("lists").join("ipset-all.txt"))
-        .map(|c| extract_block(&c).len())
-        .unwrap_or(0)
+        .map(|c| extract_block(&c))
+        .unwrap_or_default()
 }
 
 /// Убирает наш блок целиком, оставив чужое как было.

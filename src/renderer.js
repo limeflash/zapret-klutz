@@ -204,6 +204,7 @@ function switchPage(name) {
     ensureTargetsLoaded();
     loadGameTargetsArea();
   }
+  if (name === 'games') loadGames();
   if (name === 'telegram') {
     loadTgwsproxyStatus();
     loadTgwsproxyAutostart();
@@ -264,6 +265,7 @@ function render() {
   $('pageHome').classList.toggle('hidden', !hasRelease || activePage !== 'home');
   $('pageStrategies').classList.toggle('hidden', !hasRelease || activePage !== 'strategies');
   $('pageDiagnostics').classList.toggle('hidden', !hasRelease || activePage !== 'diagnostics');
+  $('pageGames').classList.toggle('hidden', !hasRelease || activePage !== 'games');
   $('pageTelegram').classList.toggle('hidden', !shellUnlocked || activePage !== 'telegram');
   $('pageSettings').classList.toggle('hidden', !hasRelease || activePage !== 'settings');
 
@@ -2540,8 +2542,8 @@ const gameFilterSeg = $('gameFilterSeg');
 // пересобирает пакеты, а игровой UDP этого не прощает — в CS2 это видно
 // как рывки и телепорты, у Valorant как ошибка подключения. В наборах
 // zapret2 игровой UDP Riot и Valorant поэтому прямо помечен «не трогать».
-function renderGameFilterNote(mode) {
-    const d = $('gameFilterDesc');
+function renderGameFilterNote(mode, el) {
+    const d = el || $('gameFilterDesc');
     if (!d) return;
     if (mode === 'udp' || mode === 'all') {
         d.innerHTML =
@@ -2705,63 +2707,55 @@ $('clearDiscordBtn').onclick = async () => {
     : 'Кэш уже пуст или Discord не найден.';
 };
 
-// ─────────── Сканирование трафика игры ───────────
+// ─────────── Игры ───────────
 //
 // Адреса игровых серверов нигде не опубликованы и меняются от региона к
 // региону. Единственный способ их узнать — посмотреть, куда ходит сам
 // процесс игры. В сообществе это делают руками через TCPView; здесь то же
-// самое, только само и сразу в список обхода.
+// самое, только само и сразу в список, по которому работает Game Filter.
 //
 // Имя процесса не спрашиваем: человек, который хочет просто поиграть, не
-// обязан знать, как называется исполняемый файл. Бэкенд находит его сам —
-// по внешним соединениям на портах, отличных от вебовых.
+// обязан знать, как называется исполняемый файл.
 
 let gameScanBusy = false;
 
-async function loadGameScan() {
-    if (gameScanBusy) return;
+async function loadGames() {
     const s = await window.zapret.getGameScan();
-    const title = $('gameScanTitle');
-    const desc = $('gameScanDesc');
-    if (s.saved > 0) {
-        title.textContent = `Адреса игр: ${s.saved}`;
-        desc.textContent =
-            s.gameFilter && s.gameFilter !== 'off'
-                ? 'Собраны и применяются. Нажми, чтобы добавить ещё: в другом режиме игры и на других картах адреса будут новые.'
-                : 'Собраны, но Game Filter выключен — до игровых портов обход не доходит, и список лежит без дела.';
-    } else {
-        title.textContent = 'Собрать адреса игры';
-        desc.textContent = 'Запусти игру и нажми — Klutz посмотрит, куда она ходит, и добавит эти адреса в обход.';
-    }
+    renderGameFilterNote(s.gameFilter, $('gameFilterDesc2'));
+    $('gameFilterSeg2')
+        .querySelectorAll('.seg-btn')
+        .forEach((b) => b.classList.toggle('active', b.dataset.gf === s.gameFilter));
+
+    if (gameScanBusy) return;
+    const addrs = s.addrs || [];
+    $('gameScanSub').textContent = addrs.length
+        ? `${addrs.length} ${plural(addrs.length, 'адрес', 'адреса', 'адресов')}`
+        : 'не собраны';
+    $('gameScanClearBtn').classList.toggle('hidden', !addrs.length);
+    const list = $('gameScanList');
+    list.classList.toggle('hidden', !addrs.length);
+    list.innerHTML = addrs.map((a) => `<span class="addr">${esc(a)}</span>`).join('');
+    $('gameScanHint').textContent = addrs.length
+        ? (s.gameFilter && s.gameFilter !== 'off'
+            ? 'Эти адреса обход и обрабатывает. Собери ещё, если сменил игру или режим: адреса добавятся к прежним.'
+            : 'Адреса собраны, но Game Filter выключен — до игровых портов обход не доходит, и список лежит без дела.')
+        : 'Запусти игру, зайди в меню или начни матч и нажми «Собрать адреса». Полминуты Klutz смотрит, куда ходит процесс игры, и складывает найденное в список, по которому работает Game Filter.';
 }
 
-$('gameScanBtn').onclick = async () => {
-    // Если что-то уже собрано, у кнопки два смысла. Отдельной плитки под
-    // уборку не заводим: убирают редко, а место в обслуживании не резиновое.
+$('gameScanClearBtn').onclick = async () => {
     const было = (await window.zapret.getGameScan()).saved;
-    if (было > 0) {
-        const ещё = await showConfirm(
-            `Сейчас собрано адресов: ${было}.\n\n` +
-                'Собрать ещё? Адреса добавятся к прежним — так и надо, если игр несколько ' +
-                'или ты сменил режим.\n\n' +
-                'Нажми «Нет», чтобы вместо этого убрать уже собранное.'
-        );
-        if (!ещё) {
-            const убрать = await showConfirm(`Убрать собранные адреса игр (${было})?`);
-            if (убрать) {
-                const res = await window.zapret.clearGameIps();
-                maint.textContent = res.ok ? 'Адреса игр убраны.' : res.error || 'Не удалось убрать.';
-                await loadGameScan();
-                loadToggles();
-            }
-            return;
-        }
-    }
+    if (!(await showConfirm(`Убрать собранные адреса игр (${было})?`))) return;
+    const res = await window.zapret.clearGameIps();
+    $('gameScanHint').textContent = res.ok ? 'Адреса игр убраны.' : res.error || 'Не удалось убрать.';
+    await loadGames();
+};
+
+$('gameScanBtn').onclick = async () => {
     // Кого именно сканировать — показываем ДО, а не ставим перед фактом.
     // Ошибиться тут дорого: адреса постороннего процесса уедут в обход.
     const cands = await window.zapret.gameCandidates();
     if (!cands.length) {
-        maint.textContent =
+        $('gameScanHint').textContent =
             'Не вижу ни одного процесса, похожего на игру. Запусти игру, зайди в меню ' +
             'или начни матч — адреса появляются, когда она реально подключается.';
         return;
@@ -2780,38 +2774,38 @@ $('gameScanBtn').onclick = async () => {
     if (!ok) return;
 
     gameScanBusy = true;
-    $('gameScanTitle').textContent = 'Смотрю, куда ходит игра…';
-    $('gameScanDesc').textContent = 'Полминуты. Не закрывай игру.';
-    maint.textContent = '';
+    $('gameScanSub').textContent = 'смотрю…';
+    $('gameScanHint').textContent = 'Полминуты. Не закрывай игру.';
     const stopProgress = window.zapret.onGameScan((p) => {
         if (!gameScanBusy) return;
-        $('gameScanDesc').textContent = p.proc
+        $('gameScanHint').textContent = p.proc
             ? `${p.proc}: адресов ${p.found}. Не закрывай игру.`
             : 'Полминуты. Не закрывай игру.';
     });
+    let note = '';
     try {
         const r = await window.zapret.scanGameTraffic([], 30);
         const ports = [];
         if (r.tcpPorts && r.tcpPorts.length) ports.push('TCP ' + r.tcpPorts.join(', '));
         if (r.udpPorts && r.udpPorts.length) ports.push('UDP ' + r.udpPorts.join(', '));
-        maint.textContent = r.note + (ports.length ? ` Порты: ${ports.join('; ')}.` : '');
+        note = r.note + (ports.length ? ` Порты: ${ports.join('; ')}.` : '');
     } catch (e) {
-        maint.textContent = typeof e === 'string' ? e : 'Не удалось отсканировать.';
+        note = typeof e === 'string' ? e : 'Не удалось отсканировать.';
     }
     stopProgress();
     gameScanBusy = false;
-    await loadGameScan();
-    // Список поменялся — режим IPSet мог стать «загружен».
-    loadToggles();
-
-    // Список без Game Filter не работает. Сказать это надо сразу, а не
-    // оставить человека гадать, почему ничего не изменилось.
-    const st = await window.zapret.getGameScan();
-    if (st.saved > 0 && (!st.gameFilter || st.gameFilter === 'off')) {
-        maint.textContent +=
-            ' Чтобы адреса заработали, включи Game Filter в «Сеть и фильтры» — начни с TCP.';
-    }
+    await loadGames();
+    $('gameScanHint').textContent = note;
 };
+
+$('gameFilterSeg2').querySelectorAll('.seg-btn').forEach((b) => {
+    b.onclick = async () => {
+        const res = await window.zapret.setGameFilter(b.dataset.gf);
+        if (!res.ok) $('gameScanHint').textContent = res.error || 'Не удалось переключить.';
+        await loadGames();
+        loadToggles();
+    };
+});
 
 // ─────────── Дополнительные стратегии ───────────
 //
@@ -3107,7 +3101,6 @@ async function afterReleaseLoaded() {
   loadTgwsproxyStatus();
   loadReleaseList();
   loadExtraStrategies();
-  loadGameScan();
   loadOverview();
   ensureTargetsLoaded();
 

@@ -151,7 +151,11 @@
       tls13: 'TLS 1.3 не проходит, а откат на 1.2 проходит — режут именно ClientHello 1.3',
       response: { verdict: 'blocked', reason: 'запрос проходит, а рукопожатие не завершается ни разу — режут ОТВЕТ', target: 0, control: 2, repeats: 2 },
     }),
-    getGameScan: async () => ({ saved: 12, gameFilter: 'tcp' }),
+    getGameScan: async () => ({
+      saved: 3,
+      addrs: ['104.16.0.1', '155.133.226.76', '162.159.135.232'],
+      gameFilter: 'tcp',
+    }),
     gameCandidates: async () => [
       { name: 'cs2.exe', score: 12, addrs: 3, ports: [27015, 27018] },
       { name: 'steam.exe', score: 4, addrs: 1, ports: [27023] },

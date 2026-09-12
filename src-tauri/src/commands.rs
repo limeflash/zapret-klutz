@@ -1517,6 +1517,9 @@ pub fn check_bypass_chance(state: State<AppState>) -> BypassChance {
 pub struct GameScanState {
     /// Сколько адресов игр уже лежит в списке релиза.
     saved: u32,
+    /// Сами адреса — раздел показывает их списком, чтобы человек видел, что
+    /// именно попало в обход, а не одно число.
+    addrs: Vec<String>,
     /// Применяется ли этот список вообще: при выключенном Game Filter
     /// игровые порты через обход не идут, и адреса там лежат впустую.
     #[serde(rename = "gameFilter")]
@@ -1526,10 +1529,12 @@ pub struct GameScanState {
 #[tauri::command(async)]
 pub fn get_game_scan(state: State<AppState>) -> GameScanState {
     let Some(root) = root_of(&state) else {
-        return GameScanState { saved: 0, game_filter: String::new() };
+        return GameScanState { saved: 0, addrs: Vec::new(), game_filter: String::new() };
     };
+    let addrs = crate::gamescan::saved_ips(&root);
     GameScanState {
-        saved: crate::gamescan::saved_count(&root) as u32,
+        saved: addrs.len() as u32,
+        addrs,
         game_filter: crate::toggles::current_game_filter(&root),
     }
 }

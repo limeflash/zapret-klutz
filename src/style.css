@@ -1353,6 +1353,23 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
 }
 
 /* ─────────── Свои адреса (список) ─────────── */
+/* Собранные адреса игр — плотной сеткой: их бывает несколько десятков,
+   и читать их построчно незачем, важно лишь видеть, что именно попало. */
+.addr-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+.addr-list .addr {
+  font-family: 'Cascadia Mono', Consolas, monospace;
+  font-size: 12.5px;
+  color: var(--tx-3);
+  background: var(--line-row);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+
 .addr-row {
   display: grid;
   grid-template-columns: minmax(120px,180px) minmax(0,1fr) 70px 90px 32px;
