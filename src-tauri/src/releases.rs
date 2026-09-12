@@ -110,6 +110,27 @@ pub fn releases_dir(app: &AppHandle) -> PathBuf {
     dir
 }
 
+/// Корень релиза внутри папки.
+///
+/// Архив zapret распаковывается с одной верхней папкой, и в каталоге
+/// релизов лежит `<имя>\<имя>\bin\winws.exe`. То же получается, когда
+/// человек распаковал .zip сам и в диалоге выбрал внешнюю папку. Если в
+/// самой папке релиза нет, а внутри ровно один подкаталог — и релиз в нём,
+/// корнем считаем его. Иначе отдаём папку как есть: гадать не будем.
+pub fn release_root(dir: &Path) -> PathBuf {
+    let is_release = |p: &Path| p.join("bin").join("winws.exe").exists();
+    if is_release(dir) {
+        return dir.to_path_buf();
+    }
+    let subdirs: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect())
+        .unwrap_or_default();
+    match subdirs.as_slice() {
+        [only] if is_release(only) => only.clone(),
+        _ => dir.to_path_buf(),
+    }
+}
+
 /// Скачиваем через curl с `--progress-bar`: он пишет проценты в stderr, что
 /// даёт живой прогресс без своего HTTP-клиента с редиректами (GitHub отдаёт
 /// 302 на S3, curl идёт по ним сам с -L).
@@ -344,13 +365,23 @@ pub fn list_releases(app: &AppHandle, current_root: Option<&str>) -> Vec<Release
             d.filter_map(|e| e.ok())
                 .filter(|e| e.path().is_dir())
                 .map(|e| {
-                    let path = e.path();
-                    let p = path.to_string_lossy().to_string();
+                    let dir = e.path();
+                    // Активный релиз узнаём по вложенности, а не по равенству
+                    // строк: root_path указывает внутрь архива (внешняя папка
+                    // → одноимённая внутренняя), а здесь — внешняя. Строгое
+                    // сравнение не совпадало никогда: у активного релиза не
+                    // было пометки, зато были «Переключиться» и «Удалить» —
+                    // и удалить его из-под себя было можно.
+                    let current = current_root
+                        .map(|c| Path::new(c).starts_with(&dir))
+                        .unwrap_or(false);
                     ReleaseEntry {
                         name: e.file_name().to_string_lossy().to_string(),
-                        current: current_root == Some(p.as_str()),
+                        current,
                         extracted_at: dir_created_ms(&e),
-                        path: p,
+                        // Настоящий корень релиза: «Переключиться» уходило с
+                        // внешней папкой и упиралось в «нет bin\winws.exe».
+                        path: release_root(&dir).to_string_lossy().to_string(),
                     }
                 })
                 .collect()
@@ -458,6 +489,26 @@ mod unit_tests {
         assert_eq!(fs::read(target.join("winws.exe")).unwrap(), b"real release");
         // И мусор после себя не оставили.
         assert!(!dir.join(".release.partial").exists(), "осталась временная папка");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn корень_релиза_находится_во_вложенной_папке() {
+        let dir = scratch("root");
+        // Как после распаковки архива zapret: <имя>\<имя>\bin\winws.exe.
+        let outer = dir.join("zapret-x");
+        let inner = outer.join("zapret-x");
+        fs::create_dir_all(inner.join("bin")).unwrap();
+        fs::write(inner.join("bin").join("winws.exe"), b"").unwrap();
+
+        assert_eq!(release_root(&outer), inner, "внешняя папка → внутренняя");
+        assert_eq!(release_root(&inner), inner, "настоящий корень остаётся собой");
+        // Папка без релиза и с одним подкаталогом, в котором релиза нет
+        // напрямую, — как есть: глубже одного уровня не спускаемся.
+        assert_eq!(release_root(&dir), dir);
+        // Две подпапки — неоднозначно, ничего не угадываем.
+        fs::create_dir_all(outer.join("другая")).unwrap();
+        assert_eq!(release_root(&outer), outer);
         let _ = fs::remove_dir_all(&dir);
     }
 }

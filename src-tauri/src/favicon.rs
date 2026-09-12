@@ -179,8 +179,18 @@ fn base64(data: &[u8]) -> String {
 /// `sizes` у `<link>` необязателен и часто врёт, но когда он есть — это
 /// единственная подсказка, какая из иконок крупнее.
 fn icon_hrefs(html: &str) -> Vec<String> {
-    let head = &html[..html.len().min(200 * 1024)];
-    let lower = head.to_lowercase();
+    // Режем по границе символа: байтовый срез посреди многобайтового
+    // символа — паника, а с panic = "abort" это падение всего приложения
+    // посреди поиска. Страницы больше 200 КБ с не-ASCII текстом — норма.
+    let mut cut = html.len().min(200 * 1024);
+    while !html.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let head = &html[..cut];
+    // Только ASCII: полный to_lowercase() меняет длину строки в байтах
+    // (İ → i̇, знак Кельвина → k), и смещения, найденные в `lower`,
+    // указывали бы в `head` не туда — вплоть до среза не по границе символа.
+    let lower = head.to_ascii_lowercase();
     let mut found: Vec<(u32, String)> = Vec::new();
 
     let mut pos = 0usize;
@@ -409,5 +419,24 @@ mod unit_tests {
         assert_eq!(absolutize("https://cdn.x.com/a.png", "x.com").as_deref(), Some("https://cdn.x.com/a.png"));
         assert_eq!(absolutize("http://x.com/a.png", "x.com"), None);
         assert_eq!(absolutize("data:image/png;base64,AAAA", "x.com"), None);
+    }
+
+    #[test]
+    fn большая_страница_с_кириллицей_не_роняет_разбор() {
+        // Раньше шапка резалась ровно на 200 КБ по байтам — попади граница
+        // внутрь «ё», и это была паника (а значит, падение приложения).
+        let mut html = String::from(r#"<link rel="icon" href="/i.png">"#);
+        while html.len() < 200 * 1024 + 3 {
+            html.push('ё');
+        }
+        assert_eq!(icon_hrefs(&html), vec!["/i.png"]);
+    }
+
+    #[test]
+    fn символы_меняющие_длину_в_нижнем_регистре_не_сдвигают_срезы() {
+        // to_lowercase() превращает «İ» в два символа, и смещения из
+        // строчной копии переставали совпадать с оригиналом.
+        let html = r#"<title>İİİİİİ</title><link rel="icon" href="/a.png"><link rel="ICON" href="/b.png">"#;
+        assert_eq!(icon_hrefs(html), vec!["/a.png", "/b.png"]);
     }
 }

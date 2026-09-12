@@ -31,6 +31,12 @@ pub struct GetStateResult {
     monitor: Option<serde_json::Value>,
     #[serde(rename = "startedAt")]
     started_at: Option<u64>,
+    /// Стоит ли в системе служба Windows «zapret» — чужая, от service.bat
+    /// самого zapret, или наша. Пока она есть, прямой запуск winws и прогон
+    /// тестов невозможны, и окну нужно предложить её снять, а не показывать
+    /// голую ошибку.
+    #[serde(rename = "serviceExists")]
+    service_exists: bool,
 }
 
 /// Снимок последней фоновой проверки в том виде, в каком его ждёт renderer
@@ -78,6 +84,7 @@ pub fn get_state(state: State<AppState>) -> GetStateResult {
         // есть и держит результат в last_check/last_targets.
         monitor: monitor_snapshot(&state),
         started_at: if running { persisted.started_at } else { None },
+        service_exists: crate::service::service_conflict(),
     }
 }
 
@@ -103,13 +110,17 @@ pub enum LoadPathResult {
 /// `load_archive` — она распаковывает архив и зовёт эту.
 #[tauri::command(async)]
 pub fn load_path(app: AppHandle, state: State<AppState>, input_path: String) -> LoadPathResult {
-    let path = PathBuf::from(&input_path);
-    if !path.is_dir() {
+    let picked = PathBuf::from(&input_path);
+    if !picked.is_dir() {
         return LoadPathResult::Err {
             ok: false,
-            error: "Нужна папка релиза (поддержка .zip будет позже).".into(),
+            error: "Нужна папка релиза или .zip-архив.".into(),
         };
     }
+    // Архив zapret распакован с одной верхней папкой — и в диалоге выбирают
+    // обычно её, а не вложенную. Спускаемся сами, вместо того чтобы отвечать
+    // «это не похоже на релиз».
+    let path = crate::releases::release_root(&picked);
 
     let check: ReleaseCheck = validate_release(&path);
     if !check.ok {
@@ -360,6 +371,18 @@ pub fn run_tests(app: AppHandle, state: State<AppState>, mode: String) -> RunTes
             return RunTestsResult { ok: false, error: Some("Сначала загрузи релиз zapret.".into()), text: String::new() }
         }
     };
+
+    // Скрипт zapret сам отказывается работать при установленной службе
+    // («Windows service 'zapret' is installed») и выходит, не написав файла
+    // результатов, — а мы отвечали невнятным «файл результатов не найден».
+    // Проверяем заранее, тем же условием, что run_config и автопрогон.
+    if crate::service::service_conflict() {
+        return RunTestsResult {
+            ok: false,
+            error: Some("Установлена служба Windows «zapret» — сначала сними её: скрипт тестов zapret при службе не работает.".into()),
+            text: String::new(),
+        };
+    }
 
     // Команды выполняются параллельно, поэтому второй запуск надо отсечь
     // здесь: два прогона одновременно перетирали бы конфиг друг другу.
@@ -958,12 +981,10 @@ pub fn get_tgwsproxy_status(app: AppHandle, state: State<AppState>) -> TgStatus 
     let s = state.persisted.lock().unwrap().tgws.clone().unwrap_or_default();
     let running = state.tgws_pid.lock().unwrap().is_some();
     let healthy = running && crate::tgws::probe_health(&s);
-    let available = app
-        .path()
-        .resource_dir()
-        .map(|d| d.join("TgWsProxyHeadless.exe").exists())
-        .unwrap_or(false)
-        || std::path::Path::new("bin/TgWsProxyHeadless.exe").exists();
+    // Тот же поиск, что и у запуска: раньше здесь была своя пара путей, и
+    // она расходилась с exe_path() — окно писало «недоступен» там, где
+    // запуск бы сработал, и наоборот.
+    let available = crate::tgws::exe_path(&app).exists();
     let tg_proxy_url = crate::tgws::proxy_url(&s);
     TgStatus { running, healthy, available, host: s.host, port: s.port, autostart: s.auto_start, tg_proxy_url }
 }

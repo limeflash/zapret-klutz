@@ -310,6 +310,10 @@ tg-ws-proxy скриптом `tools/tgwsproxy-build/build.ps1`.
 
 Semver, история — в [CHANGELOG.md](CHANGELOG.md). Каждый выпуск помечен тегом `vX.Y.Z`.
 
+Если zapret уже стоял службой Windows (через его `service.bat`), при первом
+включении обхода Klutz предложит снять её — пока служба работает, ни подбор
+стратегии, ни прямой запуск не заработают.
+
 ## Команда Klutz
 
 - **[limeflash](https://github.com/limeflash)**

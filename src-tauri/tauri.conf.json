@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Klutz",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "identifier": "com.vbu00.klutz",
   "build": {
     "frontendDist": "../src"
@@ -36,7 +36,8 @@
     "longDescription": "Графическая оболочка для zapret-discord-youtube: подбирает рабочую стратегию обхода, следит за связью и переключается сама. Встроенный прокси для Telegram.",
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerHooks": "./installer-hooks.nsh"
       }
     }
   }
