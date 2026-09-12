@@ -477,23 +477,56 @@ pub fn parse_prefixes(json: &str) -> Vec<String> {
     out
 }
 
-/// Сети оператора, которому принадлежит адрес. `None` — выяснить не вышло
-/// или оператор оказался облаком.
+/// Чей это адрес и что с ним делать.
 ///
-/// Best-effort целиком: любая осечка возвращает `None`, и вызывающий просто
-/// оставляет /24. Сеть тут не обязана быть — сбор работает и без неё.
-pub fn operator_prefixes(ip: &str) -> Option<Vec<String>> {
-    let info = crate::maintenance::http_get(&format!(
+/// Исходов ровно три, и раньше два из них были склеены в `None`: «не
+/// выяснили» и «это облако» вели к одному и тому же — сети /24 вокруг
+/// адреса. Для облака это неверно. Замерено на живом Valorant: в улов
+/// попадает адрес Cloudflare, и /24 вокруг него уезжает в игровой список,
+/// а оттуда под десинхронизацию. Именно эту строку — 104.29.153.0/24 —
+/// пришлось вычищать руками, и следующий же сбор принёс её обратно.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operator {
+    /// Сети оператора: их и кладём.
+    Nets(Vec<String>),
+    /// Оператор известен, но за его адресами стоит пол-интернета. Такой
+    /// адрес не берём совсем — ни сетями, ни /24.
+    Cloud { asn: String, prefixes: usize },
+    /// Выяснить не вышло: справочник недоступен, ответ пуст или испорчен.
+    Unknown,
+}
+
+/// Решение по числу объявленных сетей. Вынесено отдельно, чтобы
+/// проверяться без сети.
+fn decide(asn: &str, pfx: Vec<String>) -> Operator {
+    if pfx.is_empty() {
+        return Operator::Unknown;
+    }
+    if !should_expand(pfx.len()) {
+        return Operator::Cloud { asn: asn.to_string(), prefixes: pfx.len() };
+    }
+    Operator::Nets(pfx)
+}
+
+/// Спрашивает справочник, чей адрес.
+///
+/// Best-effort целиком: любая осечка — `Unknown`, и вызывающий оставляет
+/// /24. Сеть тут не обязана быть, сбор работает и без неё.
+pub fn operator_of(ip: &str) -> Operator {
+    let Ok(info) = crate::maintenance::http_get(&format!(
         "https://stat.ripe.net/data/network-info/data.json?resource={ip}"
-    ))
-    .ok()?;
-    let asn = parse_asn(&info)?;
-    let list = crate::maintenance::http_get(&format!(
+    )) else {
+        return Operator::Unknown;
+    };
+    let Some(asn) = parse_asn(&info) else {
+        return Operator::Unknown;
+    };
+    let Ok(list) = crate::maintenance::http_get(&format!(
         "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
-    ))
-    .ok()?;
-    let pfx = parse_prefixes(&list);
-    should_expand(pfx.len()).then_some(pfx)
+    )) else {
+        return Operator::Unknown;
+    };
+    decide(&asn, parse_prefixes(&list))
 }
 
 /// Адрес сервера — это один из пула, а не единственный.
@@ -582,16 +615,21 @@ fn remove_from(root: &std::path::Path, target: Target, addrs: &[String]) -> Resu
 }
 
 /// Кладёт собранные адреса в список релиза, не тронув чужие строки.
+///
+/// Возвращает то, что в список НЕ пошло, готовыми к показу строками.
+/// Пропущенное обязано доходить до человека: молча выброшенный адрес — это
+/// «собрал, а игра всё равно не работает», и причину потом не найти.
 pub fn save_ips_to(
     root: &std::path::Path,
     target: Target,
     addrs: &[String],
-) -> Result<usize, String> {
+) -> Result<Vec<String>, String> {
     let list = root.join("lists").join(target.file());
     let existing = std::fs::read_to_string(&list).unwrap_or_default();
     // К уже собранному добавляем, а не заменяем: сканов бывает несколько —
     // отдельно меню, отдельно матч, отдельно голосовой чат.
     let mut all: BTreeSet<String> = extract_block(&existing).into_iter().collect();
+    let mut skipped = Vec::new();
     for a in addrs {
         // Готовую сеть спрашивать не о чем: так приходит перенос из списка в
         // список, где адреса уже развёрнуты. Без этой проверки «Не трогать»
@@ -603,9 +641,14 @@ pub fn save_ips_to(
         // Сети оператора, если удалось выяснить; иначе /24 вокруг адреса.
         // Один адрес одного оператора спрашиваем один раз: у пойманных
         // адресов оператор обычно общий.
-        match operator_prefixes(a) {
-            Some(pfx) => all.extend(pfx),
-            None => {
+        match operator_of(a) {
+            Operator::Nets(pfx) => all.extend(pfx),
+            // Облако не берём ни в каком виде: его /24 — это чужой трафик,
+            // который обход начнёт ломать, а к игре он отношения не имеет.
+            Operator::Cloud { asn, prefixes } => {
+                skipped.push(format!("{a} — облако AS{asn}, у него {prefixes} сетей"));
+            }
+            Operator::Unknown => {
                 all.insert(to_subnet(a));
             }
         }
@@ -622,11 +665,11 @@ pub fn save_ips_to(
     // адреса» все 37 сетей Riot лежали в обоих файлах разом. Интерфейс
     // показывал «37 адресов», а игровой профиль не применялся к ним вовсе.
     remove_from(root, target.opposite(), &all)?;
-    Ok(all.len())
+    Ok(skipped)
 }
 
 /// Совместимость с прежними вызовами: по умолчанию — в обход.
-pub fn save_ips(root: &std::path::Path, addrs: &[String]) -> Result<usize, String> {
+pub fn save_ips(root: &std::path::Path, addrs: &[String]) -> Result<Vec<String>, String> {
     save_ips_to(root, Target::Bypass, addrs)
 }
 
@@ -1281,16 +1324,17 @@ mod unit_tests {
     fn живой_оператор_по_адресу() {
         // Пойманные на этой машине адреса Riot и Valve.
         for ip in ["185.40.64.5", "162.249.72.10", "146.66.155.73"] {
-            let got = operator_prefixes(ip);
-            println!("{ip}: {:?} сетей", got.as_ref().map(|v| v.len()));
-            let pfx = got.unwrap_or_else(|| panic!("{ip}: оператор не определился"));
+            let Operator::Nets(pfx) = operator_of(ip) else {
+                panic!("{ip}: оператор не определился");
+            };
+            println!("{ip}: {} сетей", pfx.len());
             assert!(!pfx.is_empty());
             assert!(pfx.iter().all(|p| p.contains('/')));
         }
         // А облако разворачивать нельзя — у него тысячи сетей.
-        let cf = operator_prefixes("104.29.153.1");
-        println!("Cloudflare: {:?}", cf.as_ref().map(|v| v.len()));
-        assert!(cf.is_none(), "облако не должно разворачиваться");
+        let cf = operator_of("104.29.153.1");
+        println!("Cloudflare: {cf:?}");
+        assert!(matches!(cf, Operator::Cloud { .. }), "облако должно опознаваться");
     }
 
     #[test]
@@ -1328,6 +1372,29 @@ mod unit_tests {
         assert!(saved_ips_in(&root, Target::Skip).is_empty(), "остались в исключениях");
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn облачный_адрес_не_попадает_в_список_вообще() {
+        // Раньше «не выяснили» и «это облако» вели к одному исходу — /24
+        // вокруг адреса. Для облака это чужая сеть в игровом списке: ровно
+        // так 104.29.153.0/24 (Cloudflare) уезжала под десинхронизацию,
+        // возвращаясь после каждой ручной чистки.
+        let сети: Vec<String> = (0..36).map(|i| format!("10.{i}.0.0/24")).collect();
+        assert!(matches!(decide("6507", сети), Operator::Nets(_)), "Riot берём");
+
+        let облако: Vec<String> = (0..2395).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)).collect();
+        match decide("13335", облако) {
+            Operator::Cloud { asn, prefixes } => {
+                assert_eq!(asn, "13335");
+                assert_eq!(prefixes, 2395);
+            }
+            иное => panic!("облако должно опознаваться, а не {иное:?}"),
+        }
+
+        // Пустой ответ — это «не выяснили», и тогда /24 остаётся: адрес
+        // настоящий, просто справочник промолчал.
+        assert_eq!(decide("6507", Vec::new()), Operator::Unknown);
     }
 
     #[test]

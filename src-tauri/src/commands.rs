@@ -1573,7 +1573,7 @@ pub fn scan_game_traffic(
     // Полминуты без единого признака жизни — плохой опыт. Шлём, что нашли
     // и у какого процесса, прямо по ходу.
     let app2 = app.clone();
-    let r = crate::gamescan::scan(
+    let mut r = crate::gamescan::scan(
         &images,
         std::time::Duration::from_secs(secs),
         std::time::Duration::from_secs(2),
@@ -1584,7 +1584,10 @@ pub fn scan_game_traffic(
     if r.addrs.is_empty() {
         return Ok(r);
     }
-    crate::gamescan::save_ips(&root, &r.addrs)?;
+    let пропущено = crate::gamescan::save_ips(&root, &r.addrs)?;
+    if !пропущено.is_empty() {
+        r.note.push_str(&облачные(&пропущено));
+    }
 
     // Списки winws читает при запуске. Без перезапуска собранные адреса
     // лежали бы в файле, ничего не меняя, — человек решил бы, что сбор не
@@ -1661,7 +1664,7 @@ pub fn scan_game_from_log(
     // будет обычным.
     let _ = crate::monitor::apply_config(&app, &active);
 
-    let note = if addrs.is_empty() {
+    let mut note = if addrs.is_empty() {
         "обход за это время не увидел ни одного подходящего адреса. Причин может быть \
          несколько: игра молчала; Game Filter выключен или стоит не на том протоколе \
          (матч обычно ходит по UDP); нужные порты не попали в фильтр конфига; winws \
@@ -1681,7 +1684,10 @@ pub fn scan_game_from_log(
     // --debug, второй после записи адресов. Первый успевал поднять обход со
     // старым списком, и он же лишний раз рвал связь.
     if !addrs.is_empty() {
-        crate::gamescan::save_ips(&root, &addrs)?;
+        let пропущено = crate::gamescan::save_ips(&root, &addrs)?;
+        if !пропущено.is_empty() {
+            note.push_str(&облачные(&пропущено));
+        }
     }
     Ok(crate::gamescan::ScanResult {
         // Именно проверка, а не «раз дошли сюда, значит работает»: winws мог
@@ -1702,6 +1708,17 @@ pub fn scan_game_from_log(
 /// `fake` с двенадцатью повторами, и игра показала высокий пинг с ошибкой
 /// сети. Адреса при этом собраны правильно — просто применять их надо в
 /// другую сторону.
+/// Приписка о том, что в список не пошло.
+///
+/// Пропуск без объяснения хуже, чем его отсутствие: человек видит «собрано
+/// 36», а поймано было 37, и разницу объяснить нечем.
+fn облачные(skipped: &[String]) -> String {
+    format!(
+        " Не взял: {}. Это облачные адреса — за ними стоит пол-интернета, а не игра, и обход ушёл бы далеко за её пределы.",
+        skipped.join("; ")
+    )
+}
+
 #[tauri::command(async)]
 pub fn exclude_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult {
     let Some(root) = root_of(&state) else {
