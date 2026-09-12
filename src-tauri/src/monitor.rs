@@ -248,22 +248,16 @@ pub fn apply_config(app: &AppHandle, name: &str) -> Result<(), String> {
 
 /// Рейтинг из свежайшего файла результатов тестов.
 pub fn latest_ranking(root: &std::path::Path) -> Vec<String> {
-    let dir = root.join("utils").join("test results");
-    let mut files: Vec<String> = match std::fs::read_dir(&dir) {
-        Ok(d) => d
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.to_lowercase().ends_with(".txt"))
-            .collect(),
-        Err(_) => return vec![],
+    // Свежайший — по времени изменения. Здесь ошибиться дороже всего:
+    // по этому рейтингу самолечение выбирает, на что переключаться.
+    let Some(path) = crate::tests::newest_result_file(root) else {
+        return vec![];
     };
-    files.sort();
-    let Some(name) = files.pop() else { return vec![] };
-    let Ok(text) = std::fs::read_to_string(dir.join(name)) else {
+    let Ok(text) = std::fs::read_to_string(path) else {
         return vec![];
     };
     let (mut rows, dpi) = crate::tests::parse_results(&text);
-    rows.sort_by(|a, b| b.score(dpi).partial_cmp(&a.score(dpi)).unwrap_or(std::cmp::Ordering::Equal));
+    rows.sort_by(|a, b| crate::tests::rank_desc(a, b, dpi));
     rows.into_iter()
         .map(|r| {
             if r.config.to_lowercase().ends_with(".bat") {

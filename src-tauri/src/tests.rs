@@ -27,22 +27,61 @@ pub struct ResultRow {
 }
 
 impl ResultRow {
+    /// Сколько целей всего проверяли — знаменатель `score`. Он зависит от
+    /// релиза и режима, поэтому восстанавливать его из доли по памяти
+    /// («было же семь целей») нельзя: число целей задаёт чужой скрипт.
+    pub fn total(&self, dpi: bool) -> u32 {
+        // saturating: числа приходят из чужого файла результатов, и сумма
+        // u32 у самой границы в release-сборке тихо переполнилась бы.
+        let base = self.ok.saturating_add(self.err).saturating_add(self.unsup);
+        if dpi {
+            base.saturating_add(self.blocked)
+        } else {
+            base
+        }
+    }
+
     /// Доля целей, которые реально ответили. В DPI-режиме «заблокировано»
     /// считается неудачей наравне с ошибкой.
     pub fn score(&self, dpi: bool) -> f64 {
-        // saturating: числа приходят из чужого файла результатов, и сумма
-        // трёх u32 у самой границы в release-сборке тихо переполнилась бы.
-        let total = if dpi {
-            self.ok.saturating_add(self.err).saturating_add(self.unsup).saturating_add(self.blocked)
-        } else {
-            self.ok.saturating_add(self.err).saturating_add(self.unsup)
-        };
+        let total = self.total(dpi);
         if total == 0 {
             0.0
         } else {
             self.ok as f64 / total as f64
         }
     }
+
+    /// Доля успешных пингов. В DPI-режиме скрипт пингов не гоняет — там ноль.
+    pub fn ping_share(&self) -> f64 {
+        let total = self.ping_ok.saturating_add(self.ping_fail);
+        if total == 0 {
+            0.0
+        } else {
+            self.ping_ok as f64 / total as f64
+        }
+    }
+}
+
+/// Порядок «лучше → хуже» внутри одного прогона.
+///
+/// Живёт в одном месте, потому что по нему выбирают трое: самолечение,
+/// меню трея и автопрогон. Разойдись они — окно предложило бы одну
+/// стратегию, а переключилось бы на другую.
+///
+/// Ping участвует только как разрешение ничьей. Он меряет доступность узла
+/// по ICMP, а режут нас на TLS ClientHello: дай пингу вес в самой оценке, и
+/// конфиг с отличным пингом и посредственным HTTP обойдёт тот, который
+/// реально работает. При равном HTTP предпочесть меньше потерь — честно.
+pub fn rank_desc(a: &ResultRow, b: &ResultRow, dpi: bool) -> std::cmp::Ordering {
+    b.score(dpi)
+        .partial_cmp(&a.score(dpi))
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            b.ping_share()
+                .partial_cmp(&a.ping_share())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 static STD_RE: Lazy<Regex> = Lazy::new(|| {
@@ -116,19 +155,20 @@ fn snapshot_results(root: &Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn newest_new_result(root: &Path, before: &HashSet<String>) -> Option<PathBuf> {
-    let dir = results_dir(root);
-    // По времени изменения, а не по алфавиту: имена файлов результатов
-    // задаёт чужой скрипт, и их порядок не обязан совпадать с временем.
-    // Фильтр по расширению — чтобы «результатом» не стал случайный файл
-    // или подкаталог, созданный скриптом позже.
-    fs::read_dir(&dir)
+/// Самый свежий файл результатов из тех, что прошли `keep`.
+///
+/// По времени изменения, а не по алфавиту: имена файлов результатов задаёт
+/// чужой скрипт, и их порядок не обязан совпадать с временем. Фильтр по
+/// расширению — чтобы «результатом» не стал случайный файл или подкаталог,
+/// созданный скриптом позже.
+fn newest_matching(root: &Path, keep: impl Fn(&str) -> bool) -> Option<PathBuf> {
+    fs::read_dir(results_dir(root))
         .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.file_name()
                 .into_string()
-                .map(|n| is_result_file(&n) && !before.contains(&n))
+                .map(|n| is_result_file(&n) && keep(&n))
                 .unwrap_or(false)
         })
         .filter_map(|e| {
@@ -137,6 +177,16 @@ fn newest_new_result(root: &Path, before: &HashSet<String>) -> Option<PathBuf> {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, p)| p)
+}
+
+fn newest_new_result(root: &Path, before: &HashSet<String>) -> Option<PathBuf> {
+    newest_matching(root, |n| !before.contains(n))
+}
+
+/// Последний прогон вообще — им пользуются окно, трей и самолечение.
+/// Раньше каждый из них брал файл по алфавиту и мог взять не тот.
+pub fn newest_result_file(root: &Path) -> Option<PathBuf> {
+    newest_matching(root, |_| true)
 }
 
 /// Один прогон `test zapret.ps1`.
@@ -264,6 +314,59 @@ mod unit_tests {
     #[test]
     fn score_пустой_строки_ноль_а_не_паника() {
         assert_eq!(row(0, 0, 0, 0).score(true), 0.0);
+    }
+
+    fn row_p(ok: u32, err: u32, ping_ok: u32, ping_fail: u32) -> ResultRow {
+        ResultRow { config: "c".into(), ok, err, unsup: 0, ping_ok, ping_fail, blocked: 0 }
+    }
+
+    #[test]
+    fn total_это_настоящее_число_целей_а_не_семь() {
+        // Раньше знаменатель восстанавливали как «доля × 7» — число целей
+        // из Electron-версии. Оно зависит от релиза и от режима.
+        assert_eq!(row(6, 1, 0, 0).total(false), 7);
+        assert_eq!(row(6, 1, 2, 0).total(false), 9);
+        // В DPI «заблокировано» тоже проверенная цель.
+        assert_eq!(row(5, 0, 0, 5).total(true), 10);
+        assert_eq!(row(5, 0, 0, 5).total(false), 5);
+        assert_eq!(row(0, 0, 0, 0).total(true), 0);
+    }
+
+    #[test]
+    fn ping_решает_только_ничью_и_не_перебивает_http() {
+        let лучше_по_http = row_p(7, 0, 0, 5); // HTTP идеален, пинг ужасен
+        let хуже_по_http = row_p(5, 2, 5, 0); // HTTP хуже, пинг идеален
+        assert_eq!(
+            rank_desc(&лучше_по_http, &хуже_по_http, false),
+            std::cmp::Ordering::Less,
+            "конфиг с лучшим HTTP должен идти первым, каким бы ни был пинг"
+        );
+    }
+
+    #[test]
+    fn при_равном_http_вперёд_идёт_меньше_потерь_по_пингу() {
+        let целый_пинг = row_p(6, 1, 7, 0);
+        let рваный_пинг = row_p(6, 1, 3, 4);
+        assert_eq!(rank_desc(&целый_пинг, &рваный_пинг, false), std::cmp::Ordering::Less);
+        assert_eq!(rank_desc(&рваный_пинг, &целый_пинг, false), std::cmp::Ordering::Greater);
+    }
+
+    #[test]
+    fn порядок_устойчив_когда_равно_всё() {
+        let a = row_p(6, 1, 7, 0);
+        let b = row_p(6, 1, 7, 0);
+        assert_eq!(rank_desc(&a, &b, false), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn сортировка_по_rank_desc_ставит_лучшее_первым() {
+        let mut rows = vec![row_p(3, 4, 7, 0), row_p(7, 0, 0, 7), row_p(5, 2, 7, 0)];
+        rows.sort_by(|a, b| rank_desc(a, b, false));
+        assert_eq!(rows.iter().map(|r| r.ok).collect::<Vec<_>>(), vec![7, 5, 3]);
+        // min_by по тому же порядку обязан дать ту же голову: им пользуются
+        // автопрогон и история, а сортировкой — трей и самолечение.
+        let best = rows.iter().min_by(|a, b| rank_desc(a, b, false)).unwrap();
+        assert_eq!(best.ok, 7);
     }
 
     #[test]

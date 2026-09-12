@@ -1498,6 +1498,14 @@ function parseResults(text) {
 // Раньше здесь были ещё и словесные уровни («Пробивает»/«Частично»/«Не
 // пробивает») — убрали: сам процент точнее и не нуждается в переводе на
 // три размытые категории. Цвет остаётся, чтобы шкала читалась с одного взгляда.
+// «6 из 7» вместо голого числа: сколько целей прошла лучшая стратегия
+// прогона и сколько их вообще было. Число целей задаёт релиз и режим, а не
+// константа — раньше здесь стояла доля, умноженная на семь.
+function bestOf(run) {
+  if (!run || !run.bestTotal) return '—';
+  return `${run.bestOk} из ${run.bestTotal}`;
+}
+
 function verdictColor(score) {
   return score >= 0.85 ? 'var(--green)' : score >= 0.4 ? 'var(--tx-3)' : 'var(--red-row)';
 }
@@ -1792,7 +1800,7 @@ async function loadTestsHistory() {
           <span class="snap-best">${esc(r.best ? displayName(r.best) : '—')}</span>
         </div>
         <div class="snap-right">
-          <span class="snap-stat">лучший результат ${r.maxScore}</span>
+          <span class="snap-stat">лучший результат ${bestOf(r)}</span>
           <span class="cf-link" data-open="${esc(r.file)}">Открыть</span>
         </div>
       </div>`
@@ -1852,7 +1860,7 @@ async function loadOverview() {
 
   if (testHistory.ok && testHistory.runs.length) {
     const last = testHistory.runs[testHistory.runs.length - 1];
-    $('statLastRun').textContent = `${last.date} · ${last.maxScore}`;
+    $('statLastRun').textContent = `${last.date} · ${bestOf(last)}`;
     lastTestBest = last.best || null;
   } else {
     $('statLastRun').textContent = 'ещё не запускались';
@@ -2512,15 +2520,33 @@ $('clearDiscordBtn').onclick = async () => {
 
 let lastDiagResults = null;
 
-function buildDiagReport(results) {
+async function buildDiagReport(results) {
   const release = currentState.rootPath ? currentState.rootPath.split(/[\\/]/).pop() : 'не загружен';
-  return [
+  const lines = [
     'Klutz — диагностика системы',
     new Date().toLocaleString('ru-RU'),
     `Релиз: ${release}`,
     '',
     ...results.map((r) => `${r.ok ? '✓' : '✗'} ${r.label}${r.warn ? ' — ' + r.warn : ''}`),
-  ].join('\n');
+  ];
+
+  // Журнал winws — единственное место, где видно, ПОЧЕМУ обход не поднялся.
+  // Шторку логов из интерфейса убрали по макету, и бэкенд с тех пор собирал
+  // строки в никуда. Отчёт диагностики — это то, что пользователь присылает,
+  // когда «не работает», так что место журналу здесь.
+  try {
+    const log = await window.zapret.getWinwsLog();
+    const tail = (log && log.lines ? log.lines : []).slice(-50);
+    if (tail.length) {
+      const state = log.live ? 'процесс запущен' : 'процесс не запущен';
+      lines.push('', `— журнал winws, последние ${tail.length} строк (${state}) —`, ...tail);
+    }
+  } catch (err) {
+    // Отчёт без журнала лучше, чем отсутствие отчёта.
+    lines.push('', `— журнал winws недоступен: ${err && err.message ? err.message : err} —`);
+  }
+
+  return lines.join('\n');
 }
 
 $('copyDiagBtn').onclick = async () => {
@@ -2534,7 +2560,7 @@ $('copyDiagBtn').onclick = async () => {
   }
   if (!lastDiagResults) return;
 
-  const text = buildDiagReport(lastDiagResults);
+  const text = await buildDiagReport(lastDiagResults);
   let copied = false;
   let lastErr = null;
   try {

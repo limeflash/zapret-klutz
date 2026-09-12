@@ -411,17 +411,22 @@ fn run_tests_inner(
     let (dpi_rows, _) = crate::tests::parse_results(&dpi_text);
     let configs = crate::release::list_configs(root);
 
-    // Номера для скрипта — позиция в его же списке (сортировка совпадает).
-    let passed: Vec<usize> = dpi_rows
-        .iter()
-        .filter(|r| r.score(true) >= 1.0)
-        .filter_map(|r| {
-            configs
-                .iter()
-                .position(|c| c.trim_end_matches(".bat") == r.config.trim_end_matches(".bat"))
-                .map(|i| i + 1)
-        })
-        .collect();
+    // Номера для скрипта — позиция конфига в НАШЕМ списке. Это допущение:
+    // мы считаем, что скрипт фильтрует папку и сортирует её так же, как мы
+    // (natural sort по ASCII против сортировки PowerShell с учётом культуры).
+    // Спросить у скрипта его собственную нумерацию нечем — меню мы не читаем,
+    // ответы уходят в stdin одной пачкой. Поэтому запоминаем, что собирались
+    // прогнать, и сверяем по именам в результате: разъехалась нумерация —
+    // мы это увидим, а не подпишем чужие цифры своими именами.
+    let mut passed: Vec<usize> = Vec::new();
+    let mut wanted: Vec<String> = Vec::new();
+    for r in dpi_rows.iter().filter(|r| r.score(true) >= 1.0) {
+        let bare = r.config.trim_end_matches(".bat");
+        if let Some(i) = configs.iter().position(|c| c.trim_end_matches(".bat") == bare) {
+            passed.push(i + 1);
+            wanted.push(bare.to_string());
+        }
+    }
 
     if passed.is_empty() {
         let _ = app.emit(
@@ -436,7 +441,33 @@ fn run_tests_inner(
         format!("── Этап 2: HTTP/Ping по {} конфигам, прошедшим DPI ──", passed.len()),
     );
     match crate::tests::run_test_script(app, root, false, Some(&passed)) {
-        Ok(text) => RunTestsResult { ok: true, error: None, text },
+        Ok(text) => {
+            let (rows2, _) = crate::tests::parse_results(&text);
+            let got: std::collections::HashSet<String> = rows2
+                .iter()
+                .map(|r| r.config.trim_end_matches(".bat").to_string())
+                .collect();
+            let want: std::collections::HashSet<String> = wanted.iter().cloned().collect();
+            if got != want {
+                // Скрипт прогнал не то, что мы просили: наша нумерация и его
+                // разошлись. Выдать это за результат воронки нельзя — имена в
+                // файле будут не те, и «лучшая стратегия» окажется той, что
+                // не проверялась.
+                let _ = app.emit(
+                    "test-log",
+                    "Второй этап прогнал не те конфиги — результат отброшен.".to_string(),
+                );
+                return RunTestsResult {
+                    ok: false,
+                    error: Some(
+                        "Второй этап прогнал не те конфиги: нумерация в скрипте не совпала с нашей.                          Результаты DPI сохранены, а для HTTP запусти обычный прогон."
+                            .into(),
+                    ),
+                    text: dpi_text,
+                };
+            }
+            RunTestsResult { ok: true, error: None, text }
+        }
         Err(e) => RunTestsResult { ok: false, error: Some(e), text: dpi_text },
     }
 }
@@ -453,17 +484,9 @@ pub fn get_last_test_results(state: State<AppState>) -> LastResults {
         Some(r) => PathBuf::from(r),
         None => return LastResults { ok: false, text: String::new() },
     };
-    let dir = root.join("utils").join("test results");
-    let mut files: Vec<_> = match std::fs::read_dir(&dir) {
-        Ok(d) => d
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.to_lowercase().ends_with(".txt"))
-            .collect(),
-        Err(_) => return LastResults { ok: false, text: String::new() },
-    };
-    files.sort();
-    match files.pop().and_then(|n| std::fs::read_to_string(dir.join(n)).ok()) {
+    // Тот же выбор «самого свежего», что и после прогона: по времени
+    // изменения. Раньше здесь был алфавит — а имена задаёт чужой скрипт.
+    match crate::tests::newest_result_file(&root).and_then(|p| std::fs::read_to_string(p).ok()) {
         Some(text) => LastResults { ok: true, text },
         None => LastResults { ok: false, text: String::new() },
     }
@@ -1056,8 +1079,13 @@ pub struct HistoryRun {
     file: String,
     best: Option<String>,
     mode: String,
-    #[serde(rename = "maxScore")]
-    max_score: u32,
+    /// Сколько целей прошла лучшая строка прогона и сколько их было всего.
+    /// Раньше здесь лежало `(доля * 7).round()` — семь целей было в
+    /// Electron-версии, а сейчас их число задаёт релиз и режим.
+    #[serde(rename = "bestOk")]
+    best_ok: u32,
+    #[serde(rename = "bestTotal")]
+    best_total: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -1083,15 +1111,24 @@ pub fn get_test_history(state: State<AppState>) -> HistoryResult {
         return HistoryResult { ok: true, runs: vec![], configs: vec![] };
     };
     let dir = root.join("utils").join("test results");
-    let mut files: Vec<String> = match std::fs::read_dir(&dir) {
+    // Порядок «от старого к новому» — по времени изменения. Имена файлов
+    // задаёт чужой скрипт, и их алфавит не обязан совпадать с хронологией.
+    let mut dated: Vec<(std::time::SystemTime, String)> = match std::fs::read_dir(&dir) {
         Ok(d) => d
             .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.to_lowercase().ends_with(".txt"))
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                if !name.to_lowercase().ends_with(".txt") {
+                    return None;
+                }
+                let t = e.metadata().and_then(|m| m.modified()).ok()?;
+                Some((t, name))
+            })
             .collect(),
         Err(_) => return HistoryResult { ok: true, runs: vec![], configs: vec![] },
     };
-    files.sort();
+    dated.sort_by(|a, b| a.0.cmp(&b.0));
+    let files: Vec<String> = dated.into_iter().map(|(_, n)| n).collect();
 
     let mut runs = Vec::new();
     // config -> доли по прогонам, в порядке от старого к новому
@@ -1105,10 +1142,10 @@ pub fn get_test_history(state: State<AppState>) -> HistoryResult {
             continue;
         }
         let best_score = rows.iter().map(|r| r.score(dpi)).fold(0.0_f64, f64::max);
-        let best = rows
-            .iter()
-            .max_by(|a, b| a.score(dpi).partial_cmp(&b.score(dpi)).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|r| r.config.clone());
+        // Тот же порядок, что у трея и самолечения, — иначе «лучшая» в
+        // истории и «лучшая» в переключении могут разойтись.
+        let best_row = rows.iter().min_by(|a, b| crate::tests::rank_desc(a, b, dpi));
+        let best = best_row.map(|r| r.config.clone());
         if let Some(b) = &best {
             *wins.entry(b.clone()).or_insert(0) += 1;
         }
@@ -1123,7 +1160,8 @@ pub fn get_test_history(state: State<AppState>) -> HistoryResult {
             file: f.clone(),
             best,
             mode: if dpi { "dpi".into() } else { "standard".into() },
-            max_score: (best_score * 7.0).round() as u32,
+            best_ok: best_row.map(|r| r.ok).unwrap_or(0),
+            best_total: best_row.map(|r| r.total(dpi)).unwrap_or(0),
         });
     }
 

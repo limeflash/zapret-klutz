@@ -191,7 +191,19 @@
     setAutoTestSchedule: noop,
     onAutoSwitched: () => () => {},
 
-    getTestHistory: async () => ({ ok: true, runs: [], configs: [] }),
+    // Не пустой список: ровно на пустом списке в своё время и не заметили,
+    // что карточка релизов рендерит «undefined». Поля — те же, что у Rust.
+    getTestHistory: async () => ({
+      ok: true,
+      runs: [
+        { date: '2026-09-10_19-20', file: '2026-09-10_19-20.txt', best: 'general (ALT).bat', mode: 'standard', bestOk: 6, bestTotal: 7 },
+        { date: '2026-09-12_08-05', file: '2026-09-12_08-05.txt', best: 'general (ALT2).bat', mode: 'dpi', bestOk: 7, bestTotal: 7 },
+      ],
+      configs: [
+        { name: 'general (ALT).bat', latestShare: 0.86, shareSeries: [1, 0.86], wins: 1 },
+        { name: 'general (ALT2).bat', latestShare: 1, shareSeries: [0.71, 1], wins: 1 },
+      ],
+    }),
     openResultFile: noop,
     openExternalUrl: noop,
     openReleaseFolder: noop,
