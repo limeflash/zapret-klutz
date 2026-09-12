@@ -193,6 +193,15 @@ pub fn run_config(app: AppHandle, state: State<AppState>, file_name: String) -> 
     std::thread::sleep(std::time::Duration::from_millis(1500));
     let running = winws::is_winws_running();
     if !running {
+        // Прежний процесс уже убит в spawn_winws, новый не поднялся — значит
+        // не работает НИЧЕГО. Оставить старое имя активным означало бы врать
+        // и окну, и трею.
+        {
+            let mut p = state.persisted.lock().unwrap();
+            p.active_config = None;
+            p.started_at = None;
+        }
+        save_state(&app, &state);
         return RunConfigResult {
             ok: false,
             error: Some("winws.exe не запустился, проверь конфиг вручную.".into()),
@@ -525,6 +534,13 @@ fn root_of(state: &State<AppState>) -> Option<PathBuf> {
 /// свою командную строку заново: «general&calc.exe» выполнило бы вторую
 /// команду от имени администратора.
 fn checked_config(root: &Path, file_name: &str) -> Result<(), String> {
+    // Членства в списке НЕДОСТАТОЧНО. Список читается с диска, а содержимое
+    // папки задаёт архив, который пользователь мог взять где угодно. Файл с
+    // именем «x&calc.bat» там вполне может лежать — и тогда cmd.exe в
+    // резервной ветке запуска выполнит вторую команду от администратора.
+    if file_name.contains(|c| "&|<>^\"'`%!()".contains(c)) {
+        return Err(format!("Недопустимые символы в имени конфига: {file_name}"));
+    }
     if crate::release::list_configs(root).iter().any(|c| c == file_name) {
         Ok(())
     } else {
@@ -1333,15 +1349,23 @@ fn bypass_chance(state: &State<AppState>) -> BypassChance {
         let p = state.persisted.lock().unwrap();
         p.game_targets.clone().unwrap_or_else(crate::targets::default_targets)
     };
-    let core: Vec<_> = list
-        .into_iter()
-        .filter(|t| t.port == 443)
-        .filter(|t| {
-            let n = t.name.to_lowercase();
-            n.starts_with("discord") || n.starts_with("youtube")
-        })
-        .take(3)
-        .collect();
+    // По одной цели на сервис, а не первые три подряд: стандартный список
+    // начинается с четырёх Discord, и `take(3)` не включал YouTube вообще —
+    // а он вполне может дать противоположный ответ.
+    let mut core: Vec<crate::targets::Target> = Vec::new();
+    for want in ["discord", "youtube"] {
+        if let Some(t) = list
+            .iter()
+            .find(|t| t.port == 443 && t.name.to_lowercase().starts_with(want))
+        {
+            core.push(t.clone());
+        }
+    }
+    // Все цели переименованы — берём первые попавшиеся, иначе предпроверка
+    // молча отвечала бы «не удалось» на полностью исправной сети.
+    if core.is_empty() {
+        core = list.iter().filter(|t| t.port == 443).take(2).cloned().collect();
+    }
 
     let timeout = std::time::Duration::from_secs(3);
     let mut targets = Vec::new();

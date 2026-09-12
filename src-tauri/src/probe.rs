@@ -87,6 +87,12 @@ impl FailureCode {
 pub enum PathVerdict {
     /// Проба прошла, классифицировать нечего.
     Ok,
+    /// Не измерено. Отдельно от всего остального: «не удалось проверить» —
+    /// это НЕ «всё хорошо» и НЕ «заблокировано».
+    Unknown,
+    /// Типизированный блок: сервер (или коробка от его имени) ответил 451.
+    /// Смена стратегии такое не лечит.
+    Legal,
     /// Путь до сервера живой, режут по имени. Наш случай: десинхронизация
     /// работает именно с этим, перебор стратегий осмыслен.
     Sni,
@@ -113,8 +119,7 @@ pub enum PathVerdict {
 pub fn classify_path(
     ok: bool,
     code: FailureCode,
-    control_ok: bool,
-    control_code: FailureCode,
+    control: Option<(bool, FailureCode)>,
 ) -> (PathVerdict, String) {
     if ok && !code.server_reachable() {
         return (PathVerdict::Ok, String::new());
@@ -123,6 +128,14 @@ pub fn classify_path(
         return (
             PathVerdict::Server,
             "ответил сам сервер — это его политика, а не блокировка".into(),
+        );
+    }
+    if code == FailureCode::HttpBlocked {
+        return (
+            PathVerdict::Legal,
+            "ответ 451 «недоступно по юридическим причинам» — это не DPI, \
+             и стратегия обхода такое не чинит"
+                .into(),
         );
     }
     if code == FailureCode::Dns {
@@ -137,6 +150,15 @@ pub fn classify_path(
             "до порта не достучались — режут адрес или порт, не имя".into(),
         );
     }
+    // Контроля нет — значит НЕ ИЗМЕРЕНО. Раньше отсутствие замера кодировалось
+    // как «контроль молчал» и превращалось в вердикт «режут адрес»: программа
+    // уверенно заявляла то, чего не проверяла.
+    let Some((control_ok, control_code)) = control else {
+        return (
+            PathVerdict::Unknown,
+            "контрольный замер не выполнялся — где именно режут, неизвестно".into(),
+        );
+    };
     if control_ok || control_code.server_reachable() {
         (
             PathVerdict::Sni,
@@ -205,7 +227,13 @@ fn reason_text(code: FailureCode) -> Option<String> {
 pub fn http_probe_pinned(host: &str, port: u16, pin_ip: Option<&str>, timeout_sec: u64) -> ProbeResult {
     let started = Instant::now();
     let scheme = if port == 443 { "https" } else { "http" };
-    let url = format!("{scheme}://{host}");
+    // Порт обязан попасть в URL: иначе curl шёл бы на стандартный для схемы,
+    // а --resolve прибивал совсем другой — и замер мерил бы не то.
+    let url = if port == 443 || port == 80 {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}:{port}")
+    };
 
     #[allow(unused_mut)]
     let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
@@ -296,21 +324,21 @@ mod unit_tests {
 
     #[test]
     fn контроль_отвечает_значит_режут_имя() {
-        let (v, why) = classify_path(false, FailureCode::TlsFailed, true, FailureCode::Ok);
+        let (v, why) = classify_path(false, FailureCode::TlsFailed, Some((true, FailureCode::Ok)));
         assert_eq!(v, PathVerdict::Sni);
         assert!(why.contains(NEUTRAL_SNI));
     }
 
     #[test]
     fn контроль_тоже_молчит_значит_режут_адрес() {
-        let (v, _) = classify_path(false, FailureCode::TlsFailed, false, FailureCode::Timeout);
+        let (v, _) = classify_path(false, FailureCode::TlsFailed, Some((false, FailureCode::Timeout)));
         assert_eq!(v, PathVerdict::Ip);
     }
 
     #[test]
     fn ответ_сервера_не_блокировка() {
         // Сертификат не прошёл проверку — но он БЫЛ, значит сервер жив.
-        let (v, _) = classify_path(false, FailureCode::TlsCert, false, FailureCode::Timeout);
+        let (v, _) = classify_path(false, FailureCode::TlsCert, Some((false, FailureCode::Timeout)));
         assert_eq!(v, PathVerdict::Server);
     }
 
@@ -318,14 +346,14 @@ mod unit_tests {
     fn до_порта_не_дошли_контроль_не_спрашиваем() {
         // Контроль тут неинформативен: имени на проводе ещё не было.
         for code in [FailureCode::TcpRefused, FailureCode::Dns] {
-            let (v, _) = classify_path(false, code, true, FailureCode::Ok);
+            let (v, _) = classify_path(false, code, Some((true, FailureCode::Ok)));
             assert_eq!(v, PathVerdict::Ip, "{code:?}");
         }
     }
 
     #[test]
     fn успешная_проба_не_классифицируется() {
-        let (v, why) = classify_path(true, FailureCode::Ok, false, FailureCode::Timeout);
+        let (v, why) = classify_path(true, FailureCode::Ok, Some((false, FailureCode::Timeout)));
         assert_eq!(v, PathVerdict::Ok);
         assert!(why.is_empty());
     }
@@ -334,8 +362,27 @@ mod unit_tests {
     fn контроль_с_чужим_сертификатом_считается_ответом() {
         // Нейтральное имя прибито к чужому адресу, сертификат не совпадёт —
         // но ответ TLS-уровня получен, значит путь живой.
-        let (v, _) = classify_path(false, FailureCode::TlsFailed, false, FailureCode::TlsCert);
+        let (v, _) = classify_path(false, FailureCode::TlsFailed, Some((false, FailureCode::TlsCert)));
         assert_eq!(v, PathVerdict::Sni);
+    }
+
+    #[test]
+    fn без_контроля_вердикт_не_измерено() {
+        // Раньше отсутствие замера кодировалось как «контроль молчал» и
+        // превращалось в уверенное «режут адрес» — программа заявляла то,
+        // чего не проверяла.
+        let (v, why) = classify_path(false, FailureCode::TlsFailed, None);
+        assert_eq!(v, PathVerdict::Unknown);
+        assert!(why.contains("не выполнялся"), "{why}");
+    }
+
+    #[test]
+    fn код_451_не_повод_перебирать_стратегии() {
+        // Контроль на example.com ответит, и по общему правилу вышло бы
+        // «режут по имени» — то есть бесполезный перебор.
+        let (v, why) = classify_path(false, FailureCode::HttpBlocked, Some((true, FailureCode::Ok)));
+        assert_eq!(v, PathVerdict::Legal, "{why}");
+        assert!(why.contains("451"), "{why}");
     }
 
     #[test]

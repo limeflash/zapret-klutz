@@ -84,16 +84,15 @@ fn probe_target(t: &Target) -> TargetResult {
         let main = http_probe_pinned(&t.host, t.port, ip.as_deref(), 4);
 
         let (verdict, why) = if main.code.needs_control() {
-            match ip.as_deref() {
-                Some(ip) => {
-                    let c = http_probe_pinned(NEUTRAL_SNI, t.port, Some(ip), 4);
-                    classify_path(main.ok, main.code, c.ok, c.code)
-                }
-                // Адреса нет — контроль невозможен, врать вердиктом не будем.
-                None => classify_path(main.ok, main.code, false, FailureCode::Unknown),
-            }
+            // Адреса нет — контроль невозможен. Передаём None, а не «контроль
+            // молчал»: вердикт тогда честно скажет «не измерено».
+            let control = ip
+                .as_deref()
+                .map(|ip| http_probe_pinned(NEUTRAL_SNI, t.port, Some(ip), 4))
+                .map(|c| (c.ok, c.code));
+            classify_path(main.ok, main.code, control)
         } else {
-            classify_path(main.ok, main.code, false, FailureCode::Unknown)
+            classify_path(main.ok, main.code, None)
         };
         (main, "http", verdict, why)
     } else {

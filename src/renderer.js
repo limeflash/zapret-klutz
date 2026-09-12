@@ -1069,6 +1069,8 @@ const PATH_LABEL = {
   ip: 'Блок по адресу',
   server: 'Отказ сервера',
   sni: 'Режут по имени',
+  legal: 'Блок по закону',
+  unknown: 'Не измерено',
 };
 
 function verdict(t) {
@@ -1084,6 +1086,10 @@ function pathNote(targets) {
   const failed = (targets || []).filter((t) => !t.ok);
   if (!failed.length) return '';
   const every = (v) => failed.every((t) => t.verdict === v);
+  if (every('legal')) {
+    return 'Сервер отвечает 451 «недоступно по юридическим причинам» — это не DPI, ' +
+      'и сменой стратегии такое не лечится.';
+  }
   if (every('ip')) {
     return 'С нейтральным именем те же адреса тоже молчат — режут адрес, а не имя. ' +
       'Обход такое не обходит: поможет другой адрес или туннель.';

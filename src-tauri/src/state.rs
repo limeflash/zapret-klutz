@@ -195,3 +195,4 @@ fn try_save_state(app: &AppHandle, state: &AppState) -> std::io::Result<()> {
     fs::write(&tmp, json)?;
     fs::rename(&tmp, &target)
 }
+

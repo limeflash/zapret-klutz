@@ -200,6 +200,10 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
         *state.winws_child.lock().unwrap() = Some(child);
         watch_child(app, pid);
     } else {
+        // Флаг «остановили намеренно» ставит kill_winws, и он остаётся
+        // взведённым. Без сброса watch_by_poll принял бы падение резервного
+        // конфига за нашу же остановку и промолчал.
+        *state.winws_intentional_stop.lock().unwrap() = false;
         // Fallback: run the .bat itself via cmd — no live logs, but works
         // for any release shape, same tradeoff as the Electron fallback.
         #[allow(unused_mut)]

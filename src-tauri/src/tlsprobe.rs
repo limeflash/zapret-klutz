@@ -352,6 +352,11 @@ pub fn aggregate(verdicts: &[FragVerdict]) -> (FragVerdict, String) {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct HsSeen {
     pub server_hello: bool,
+    /// Сервер договорился именно на TLS 1.3. Отличать важно: 1.2-only сервер
+    /// отвечает на наш 1.3-способный ClientHello обычным ServerHello, и по
+    /// одному факту ответа получилось бы «1.3 проходит» на сервере, который
+    /// его вовсе не умеет.
+    pub tls13: bool,
     /// Сертификат пришёл ЦЕЛИКОМ. Именно на нём режут ответ в TLS 1.2.
     pub certificate: bool,
     /// ServerHelloDone — сервер досказал свою часть.
@@ -380,7 +385,11 @@ pub fn scan_records(buf: &[u8]) -> HsSeen {
             break; // запись не доехала целиком
         };
         match kind {
-            0x16 => hs.extend_from_slice(&buf[start..end]),
+            // После alert поток рукопожатия оборван. Продолжать склейку
+            // нельзя: коробка, обрубившая сертификат и приславшая alert,
+            // могла дослать остаток — и обрезанное сообщение выглядело бы
+            // пришедшим целиком, то есть ровно наоборот тому, что мы ловим.
+            0x16 if !seen.alert => hs.extend_from_slice(&buf[start..end]),
             0x15 => seen.alert = true,
             // 0x17 — application_data: в TLS 1.3 всё после ServerHello уже
             // зашифровано, разбирать там нечего.
@@ -397,7 +406,10 @@ pub fn scan_records(buf: &[u8]) -> HsSeen {
             break; // сообщение оборвано — целым его не считаем
         };
         match t {
-            0x02 => seen.server_hello = true,
+            0x02 => {
+                seen.server_hello = true;
+                seen.tls13 = server_hello_is_tls13(&hs[j + 4..next]);
+            }
             0x0b => seen.certificate = true,
             0x0e => seen.done = true,
             _ => {}
@@ -408,6 +420,37 @@ pub fn scan_records(buf: &[u8]) -> HsSeen {
         j = next;
     }
     seen
+}
+
+/// Договорился ли сервер на TLS 1.3, судя по телу его ServerHello.
+///
+/// В 1.3 поле версии осталось равным 0x0303 ради совместимости, а настоящая
+/// версия лежит в расширении supported_versions (0x002b) значением 0x0304.
+fn server_hello_is_tls13(body: &[u8]) -> bool {
+    // legacy_version(2) random(32) session_id_len(1)
+    let mut i = 34usize;
+    let Some(&sid) = body.get(i) else { return false };
+    i += 1 + sid as usize;
+    i += 2 + 1; // cipher_suite(2) compression(1)
+    if i + 2 > body.len() {
+        return false;
+    }
+    let ext_len = u16::from_be_bytes([body[i], body[i + 1]]) as usize;
+    i += 2;
+    let end = (i + ext_len).min(body.len());
+    while i + 4 <= end {
+        let kind = u16::from_be_bytes([body[i], body[i + 1]]);
+        let len = u16::from_be_bytes([body[i + 2], body[i + 3]]) as usize;
+        let val = i + 4;
+        let Some(stop) = val.checked_add(len).filter(|s| *s <= end) else {
+            return false;
+        };
+        if kind == 0x002b && len == 2 {
+            return body[val] == 0x03 && body[val + 1] == 0x04;
+        }
+        i = stop;
+    }
+    false
 }
 
 /// Отправляет ClientHello и читает ответ, пока сервер не досказал своё или
@@ -490,11 +533,14 @@ pub struct ResponseResult {
 /// нейтральным именем на ТОТ ЖЕ адрес обязано завершаться. Не завершается —
 /// значит сервер не умеет 1.2 или мешает что-то ещё, и вывода мы не делаем.
 pub fn classify_response(target: u32, control: u32, repeats: u32) -> (RespVerdict, String) {
-    if control == 0 {
+    // Контроль обязан завершиться ВСЕ разы, а не хоть раз: на одном успехе
+    // из двух говорить «с нейтральным именем отвечает каждый раз» нельзя, а
+    // вердикт «режут ответ» строится именно на этом утверждении.
+    if control < repeats {
         return (
             RespVerdict::NotApplicable,
-            "контрольное рукопожатие по TLS 1.2 не завершается — сервер его не поддерживает \
-             или мешает что-то ещё; про ответное направление вывода нет"
+            "контрольное рукопожатие по TLS 1.2 завершается не каждый раз — сервер его не \
+             поддерживает или мешает что-то ещё; про ответное направление вывода нет"
                 .into(),
         );
     }
@@ -584,7 +630,10 @@ pub fn probe_tls13_block(
     sni: &str,
     timeout: Duration,
 ) -> (Tls13Verdict, String) {
-    let v13 = handshake_probe(ip, port, sni, false, timeout).0.server_hello;
+    // Именно tls13, а не «пришёл ServerHello»: сервер, умеющий только 1.2,
+    // ответит на наш 1.3-способный ClientHello согласованием 1.2, и по факту
+    // ответа вышло бы «1.3 проходит».
+    let v13 = handshake_probe(ip, port, sni, false, timeout).0.tls13;
     // Лишний заход платим, только когда 1.3 не прошёл.
     let v12 = if v13 {
         true
@@ -787,6 +836,55 @@ mod unit_tests {
         // Контроль молчит — вывода нет, и это НЕ «всё хорошо».
         assert_eq!(classify_response(0, 0, 3).0, NotApplicable);
         assert_eq!(classify_response(3, 0, 3).0, NotApplicable);
+    }
+
+    #[test]
+    fn нестабильный_контроль_не_даёт_вердикта() {
+        // Контроль прошёл раз из двух: утверждать «с нейтральным именем
+        // отвечает каждый раз» нельзя, а вердикт «режут ответ» держится
+        // именно на этом.
+        assert_eq!(classify_response(0, 1, 2).0, RespVerdict::NotApplicable);
+        assert_eq!(classify_response(0, 2, 2).0, RespVerdict::Blocked);
+    }
+
+    #[test]
+    fn после_alert_поток_рукопожатия_не_склеивается() {
+        // Коробка обрубает сертификат, шлёт alert и досылает хвост. Без
+        // проверки хвост дописался бы к обрубку, и сообщение выглядело бы
+        // пришедшим целиком — ровно наоборот тому, что мы ловим.
+        let cert = сообщение(0x0b, 600);
+        let mut поток = запись(0x16, &сообщение(0x02, 70));
+        поток.extend(запись(0x16, &cert[..200]));
+        поток.extend(запись(0x15, &[0x02, 0x28]));
+        поток.extend(запись(0x16, &cert[200..]));
+        let seen = scan_records(&поток);
+        assert!(seen.server_hello);
+        assert!(seen.alert);
+        assert!(!seen.certificate, "хвост после alert склеивать нельзя");
+    }
+
+    #[test]
+    fn версия_берётся_из_расширения_а_не_из_факта_ответа() {
+        // ServerHello 1.2: поле версии 0x0303, расширения пустые.
+        let mut sh12 = vec![0x03, 0x03];
+        sh12.extend(std::iter::repeat_n(0x11, 32)); // random
+        sh12.push(0); // session_id_len
+        sh12.extend_from_slice(&[0xc0, 0x2f]); // cipher
+        sh12.push(0); // compression
+        sh12.extend_from_slice(&[0x00, 0x00]); // ext_len = 0
+        assert!(!server_hello_is_tls13(&sh12), "это 1.2");
+
+        // ServerHello 1.3: то же, но с supported_versions = 0x0304.
+        let mut sh13 = sh12.clone();
+        sh13.truncate(sh13.len() - 2);
+        sh13.extend_from_slice(&[0x00, 0x06]); // ext_len
+        sh13.extend_from_slice(&[0x00, 0x2b, 0x00, 0x02, 0x03, 0x04]);
+        assert!(server_hello_is_tls13(&sh13), "это 1.3");
+
+        // Обрывки не должны ронять разбор.
+        for n in 0..sh13.len() {
+            let _ = server_hello_is_tls13(&sh13[..n]);
+        }
     }
 
     #[test]

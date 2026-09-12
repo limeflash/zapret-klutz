@@ -42,6 +42,9 @@
   const FAIL_KINDS = [
     { verdict: 'sni', code: 'tls_failed', why: 'с нейтральным именем example.com тот же адрес отвечает — режут по имени' },
     { verdict: 'server', code: 'tls_cert', why: 'ответил сам сервер — это его политика, а не блокировка' },
+    { verdict: 'ip', code: 'timeout', why: 'с нейтральным именем тот же адрес тоже молчит — режут адрес, не имя' },
+    { verdict: 'legal', code: 'http_451', why: 'ответ 451 — это не DPI, и стратегия обхода такое не чинит' },
+    { verdict: 'unknown', code: 'unknown', why: 'контрольный замер не выполнялся — где именно режут, неизвестно' },
   ];
 
   function pingResult(t, i) {

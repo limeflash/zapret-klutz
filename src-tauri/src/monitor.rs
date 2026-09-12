@@ -67,7 +67,12 @@ fn desync_can_help(results: &[targets::TargetResult]) -> bool {
     if failed.is_empty() {
         return false;
     }
-    failed.iter().any(|r| r.verdict != PathVerdict::Ip)
+    // Блок по адресу и юридический 451 стратегией не лечатся. «Не измерено»
+    // не мешает попробовать: запрещать перебор из-за неудавшегося замера
+    // было бы хуже лишней попытки.
+    failed
+        .iter()
+        .any(|r| !matches!(r.verdict, PathVerdict::Ip | PathVerdict::Legal))
 }
 
 pub fn start(app: AppHandle) {
@@ -108,8 +113,18 @@ fn tick(app: &AppHandle) {
     // Если пользователь переименовал все цели, признака «ключевая» не
     // остаётся. Раньше на этом месте был ранний return — и мониторинг тихо
     // умирал навсегда: трей застывал на старых данных, самолечение не
-    // срабатывало, сообщения об этом не было. Берём тогда весь список.
-    let mut core: Vec<_> = list.iter().filter(|t| service_of(&t.name).is_some()).cloned().collect();
+    // срабатывало, сообщения об этом не было.
+    //
+    // Отбирать по признаку можно, только если ОБА сервиса опознались.
+    // Иначе выходило хуже незаметного: переименовали цели Discord, YouTube
+    // остались стандартными — core непустой, всё выглядит рабочим, а падение
+    // Discord не замечается вовсе.
+    let есть = |s: &str| list.iter().any(|t| service_of(&t.name) == Some(s));
+    let mut core: Vec<_> = if есть("discord") && есть("youtube") {
+        list.iter().filter(|t| service_of(&t.name).is_some()).cloned().collect()
+    } else {
+        Vec::new()
+    };
     if core.is_empty() {
         core = list;
     }
@@ -454,6 +469,18 @@ mod unit_tests {
         assert_eq!(service_of("Discord Main"), Some("discord"));
         assert_eq!(service_of("YOUTUBE Web"), Some("youtube"));
         assert_eq!(service_of("Steam"), None);
+    }
+
+    #[test]
+    fn юридический_блок_перебор_не_запускает() {
+        // 451 приходит от самого сервера по требованию закона — стратегия
+        // такое не лечит, как и блок по адресу.
+        let r = vec![mk("Discord Main", false, PathVerdict::Legal)];
+        assert!(!desync_can_help(&r));
+        // А вот «не измерено» перебору не мешает: лишняя попытка дешевле
+        // отказа из-за неудавшегося замера.
+        let r = vec![mk("Discord Main", false, PathVerdict::Unknown)];
+        assert!(desync_can_help(&r));
     }
 
     #[test]
