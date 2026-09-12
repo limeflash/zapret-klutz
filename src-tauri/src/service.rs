@@ -95,6 +95,8 @@ pub fn can_install_service(root: &Path) -> bool {
 }
 
 pub fn install_service(root: &Path, file_name: &str) -> Result<(), String> {
+    // Служба поднимает winws с теми же аргументами — списки нужны и ей.
+    crate::maintenance::ensure_user_lists(root);
     patch_service_bat(root)
         .map_err(|e| format!("Автоустановка недоступна для этой версии service.bat: {e}"))?;
 

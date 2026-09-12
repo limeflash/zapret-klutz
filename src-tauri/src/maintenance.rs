@@ -194,6 +194,39 @@ pub fn clear_discord_cache() -> CacheClear {
     CacheClear { ok: true, cleared }
 }
 
+/// Пользовательские списки, на которые ссылается КАЖДЫЙ конфиг zapret
+/// (`--hostlist="%LISTS%list-general-user.txt"` и ещё два), но которых нет в
+/// поставке: их создаёт `service.bat load_user_lists`, а вызывает его сам
+/// .bat перед запуском winws.
+///
+/// Klutz поднимает winws напрямую, разобрав аргументы, и этот шаг пропускал.
+/// На чистой установке свежего релиза файлов нет, winws не может открыть
+/// список и выходит сразу — окно показывало «winws.exe не запустился,
+/// проверь конфиг вручную» на каждом конфиге. Содержимое — ровно то, что
+/// пишет service.bat; существующие файлы не трогаем.
+pub fn ensure_user_lists(root: &Path) {
+    let lists = root.join("lists");
+    if !lists.is_dir() {
+        return;
+    }
+    for (name, body) in [
+        ("ipset-exclude-user.txt", "203.0.113.113/32
+"),
+        // Пустым этот файл оставлять нельзя — так написано и в самом
+        // релизе: hostlist без строк означает «применять ко всему».
+        ("list-general-user.txt", "# Never leave this file empty
+domain.example.abc
+"),
+        ("list-exclude-user.txt", "domain.example.abc
+"),
+    ] {
+        let path = lists.join(name);
+        if !path.exists() {
+            let _ = fs::write(&path, body);
+        }
+    }
+}
+
 // ─────────── Свои списки доменов ───────────
 
 fn list_paths(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -254,6 +287,42 @@ pub fn save_custom_lists(root: &Path, include: &str, exclude: &str) -> Result<()
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    /// Без этих файлов winws не стартует ни с одним конфигом: в поставке
+    /// свежего релиза их нет, а в строке запуска они есть.
+    #[test]
+    fn недостающие_пользовательские_списки_создаются() {
+        let dir = std::env::temp_dir().join(format!("klutz-lists-{}", std::process::id()));
+        let lists = dir.join("lists");
+        let _ = fs::create_dir_all(&lists);
+        // Один файл уже лежит и правлен человеком — его трогать нельзя.
+        fs::write(lists.join("list-exclude-user.txt"), "моё.example
+").unwrap();
+
+        ensure_user_lists(&dir);
+
+        let general = fs::read_to_string(lists.join("list-general-user.txt")).unwrap();
+        assert!(!general.trim().is_empty(), "пустой hostlist означает «применять ко всему»");
+        assert!(fs::read_to_string(lists.join("ipset-exclude-user.txt")).unwrap().contains("203.0.113.113"));
+        assert_eq!(
+            fs::read_to_string(lists.join("list-exclude-user.txt")).unwrap(),
+            "моё.example
+",
+            "существующий список перезаписывать нельзя"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Папки lists нет — значит это не релиз zapret, и создавать там нечего.
+    #[test]
+    fn без_папки_списков_ничего_не_создаётся() {
+        let dir = std::env::temp_dir().join(format!("klutz-nolists-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        ensure_user_lists(&dir);
+        assert!(!dir.join("lists").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn версия_берётся_из_local_version() {

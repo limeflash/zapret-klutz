@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::release::{validate_release, ReleaseCheck};
 use crate::state::{save_state, AppState};

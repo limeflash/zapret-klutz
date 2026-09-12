@@ -150,6 +150,11 @@ fn push_log_lines(app: &AppHandle, state: &AppState, chunk: &str) {
 pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
 
+    // Без пользовательских списков winws не стартует вовсе: в строке запуска
+    // стоят --hostlist на файлы, которых в поставке нет (их создаёт
+    // service.bat, а мы запускаем winws напрямую).
+    crate::maintenance::ensure_user_lists(root);
+
     // Kill whatever's running first — same "stop before start" as applyDirect().
     {
         let mut child_guard = state.winws_child.lock().unwrap();
