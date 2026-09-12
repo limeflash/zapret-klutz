@@ -1511,6 +1511,73 @@ pub fn check_bypass_chance(state: State<AppState>) -> BypassChance {
     bypass_chance(&state)
 }
 
+// ─────────── Сканирование трафика игры ───────────
+
+#[derive(Debug, Serialize)]
+pub struct GameScanState {
+    /// Сколько адресов игр уже лежит в списке релиза.
+    saved: u32,
+    /// Применяется ли этот список вообще: при выключенном Game Filter
+    /// игровые порты через обход не идут, и адреса там лежат впустую.
+    #[serde(rename = "gameFilter")]
+    game_filter: String,
+}
+
+#[tauri::command(async)]
+pub fn get_game_scan(state: State<AppState>) -> GameScanState {
+    let Some(root) = root_of(&state) else {
+        return GameScanState { saved: 0, game_filter: String::new() };
+    };
+    GameScanState {
+        saved: crate::gamescan::saved_count(&root) as u32,
+        game_filter: crate::toggles::current_game_filter(&root),
+    }
+}
+
+/// Сканирует, пока идёт указанное время, и сразу кладёт найденное в список.
+///
+/// Имена процессов приходят из интерфейса и в командную строку НЕ уезжают:
+/// они попадают в фильтр tasklist как один аргумент, который система
+/// передаёт процессу целиком. Но длину ограничиваем — иначе чужая строка на
+/// мегабайт просто съест память.
+#[tauri::command(async)]
+pub fn scan_game_traffic(
+    state: State<AppState>,
+    images: Vec<String>,
+    seconds: Option<u64>,
+) -> Result<crate::gamescan::ScanResult, String> {
+    let root = root_of(&state).ok_or("Сначала загрузи релиз zapret.")?;
+    let images: Vec<String> = images
+        .into_iter()
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty() && i.len() <= 120)
+        .take(8)
+        .collect();
+    // Пусто — значит «найди сам»: спрашивать имя процесса у человека,
+    // который просто хочет, чтобы игра работала, — плохая мысль.
+    let secs = seconds.unwrap_or(30).clamp(5, 300);
+    let r = crate::gamescan::scan(
+        &images,
+        std::time::Duration::from_secs(secs),
+        std::time::Duration::from_secs(2),
+    );
+    if !r.addrs.is_empty() {
+        crate::gamescan::save_ips(&root, &r.addrs)?;
+    }
+    Ok(r)
+}
+
+#[tauri::command(async)]
+pub fn clear_game_ips(state: State<AppState>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    match crate::gamescan::clear_ips(&root) {
+        Ok(()) => ok(),
+        Err(e) => err(e),
+    }
+}
+
 // ─────────── Дополнительные стратегии ───────────
 
 #[derive(Debug, Serialize)]

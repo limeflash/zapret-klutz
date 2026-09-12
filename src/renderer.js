@@ -2705,6 +2705,72 @@ $('clearDiscordBtn').onclick = async () => {
     : 'Кэш уже пуст или Discord не найден.';
 };
 
+// ─────────── Сканирование трафика игры ───────────
+//
+// Адреса игровых серверов нигде не опубликованы и меняются от региона к
+// региону. Единственный способ их узнать — посмотреть, куда ходит сам
+// процесс игры. В сообществе это делают руками через TCPView; здесь то же
+// самое, только само и сразу в список обхода.
+//
+// Имя процесса не спрашиваем: человек, который хочет просто поиграть, не
+// обязан знать, как называется исполняемый файл. Бэкенд находит его сам —
+// по внешним соединениям на портах, отличных от вебовых.
+
+let gameScanBusy = false;
+
+async function loadGameScan() {
+    if (gameScanBusy) return;
+    const s = await window.zapret.getGameScan();
+    const title = $('gameScanTitle');
+    const desc = $('gameScanDesc');
+    if (s.saved > 0) {
+        title.textContent = `Адреса игр: ${s.saved}`;
+        desc.textContent =
+            s.gameFilter && s.gameFilter !== 'off'
+                ? 'Собраны и применяются. Нажми, чтобы добавить ещё: в другом режиме игры и на других картах адреса будут новые.'
+                : 'Собраны, но Game Filter выключен — до игровых портов обход не доходит, и список лежит без дела.';
+    } else {
+        title.textContent = 'Собрать адреса игры';
+        desc.textContent = 'Запусти игру и нажми — Klutz посмотрит, куда она ходит, и добавит эти адреса в обход.';
+    }
+}
+
+$('gameScanBtn').onclick = async () => {
+    const ok = await showConfirm(
+        'Сканирование займёт полминуты.\n\n' +
+            'Всё это время игра должна работать: зайди в меню, начни матч. ' +
+            'Адреса появляются только тогда, когда игра реально подключается — ' +
+            'до серверов, которые режут, она не дотянется. Поэтому сканировать ' +
+            'лучше при уже работающем обходе: сперва дать игре дотянуться, потом ' +
+            'закрепить найденное.'
+    );
+    if (!ok) return;
+
+    gameScanBusy = true;
+    $('gameScanTitle').textContent = 'Смотрю, куда ходит игра…';
+    $('gameScanDesc').textContent = 'Полминуты. Не закрывай игру.';
+    maint.textContent = '';
+    try {
+        const r = await window.zapret.scanGameTraffic([], 30);
+        const ports = [];
+        if (r.tcpPorts && r.tcpPorts.length) ports.push('TCP ' + r.tcpPorts.join(', '));
+        if (r.udpPorts && r.udpPorts.length) ports.push('UDP ' + r.udpPorts.join(', '));
+        maint.textContent = r.note + (ports.length ? ` Порты: ${ports.join('; ')}.` : '');
+    } catch (e) {
+        maint.textContent = typeof e === 'string' ? e : 'Не удалось отсканировать.';
+    }
+    gameScanBusy = false;
+    await loadGameScan();
+
+    // Список без Game Filter не работает. Сказать это надо сразу, а не
+    // оставить человека гадать, почему ничего не изменилось.
+    const st = await window.zapret.getGameScan();
+    if (st.saved > 0 && (!st.gameFilter || st.gameFilter === 'off')) {
+        maint.textContent +=
+            ' Чтобы адреса заработали, включи Game Filter в «Сеть и фильтры» — начни с TCP.';
+    }
+};
+
 // ─────────── Дополнительные стратегии ───────────
 //
 // Варианты конфига из релиза с другими точками разреза. Файлы кладутся прямо
@@ -2999,6 +3065,7 @@ async function afterReleaseLoaded() {
   loadTgwsproxyStatus();
   loadReleaseList();
   loadExtraStrategies();
+  loadGameScan();
   loadOverview();
   ensureTargetsLoaded();
 
