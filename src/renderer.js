@@ -1263,36 +1263,73 @@ function renderCustomAddressList() {
 // ─────────── Командная палитра «добавить адрес» (Ctrl+K) ───────────
 
 const CATALOG = [
-  { g: 'Игры', name: 'Rocket League', host: 'api.rlpp.psynet.gg', port: 443 },
-  { g: 'Игры', name: 'Fortnite', host: 'fortnite-public-service-prod11.ol.epicgames.com', port: 443 },
-  { g: 'Игры', name: 'Valorant', host: 'glz-ru-1.ru.a.pvp.net', port: 443 },
-  { g: 'Игры', name: 'League of Legends', host: 'euw.api.riotgames.com', port: 443 },
-  { g: 'Игры', name: 'Apex Legends', host: 'r5-crossplay.r5prod.stryder.respawn.com', port: 443 },
-  { g: 'Игры', name: 'Roblox', host: 'apis.roblox.com', port: 443 },
-  { g: 'Игры', name: 'Minecraft', host: 'sessionserver.mojang.com', port: 443 },
-  { g: 'Игры', name: 'Genshin Impact', host: 'sdk-os-static.hoyoverse.com', port: 443 },
-  { g: 'Игры', name: 'Overwatch 2', host: 'eu.actual.battle.net', port: 1119 },
-  { g: 'Игры', name: 'Counter-Strike 2', host: 'cm.steampowered.com', port: 27017 },
-  { g: 'Игры', name: 'Dota 2', host: 'api.steampowered.com', port: 443 },
-  { g: 'Игры', name: 'Warframe', host: 'api.warframe.com', port: 443 },
-  { g: 'Игры', name: 'Destiny 2', host: 'www.bungie.net', port: 443 },
-  { g: 'Игры', name: 'War Thunder', host: 'login.gaijin.net', port: 443 },
-  { g: 'Платформы', name: 'Steam', host: 'api.steampowered.com', port: 443 },
-  { g: 'Платформы', name: 'Epic Online', host: 'api.epicgames.dev', port: 443 },
-  { g: 'Платформы', name: 'Riot', host: 'auth.riotgames.com', port: 443 },
-  { g: 'Платформы', name: 'Battle.net', host: 'us.actual.battle.net', port: 1119 },
-  { g: 'Платформы', name: 'Xbox Live', host: 'title.mgt.xboxlive.com', port: 443 },
-  { g: 'Платформы', name: 'PlayStation Network', host: 'auth.api.sonyentertainmentnetwork.com', port: 443 },
-  { g: 'Платформы', name: 'EA App', host: 'accounts.ea.com', port: 443 },
-  { g: 'Платформы', name: 'Ubisoft Connect', host: 'public-ubiservices.ubi.com', port: 443 },
-  { g: 'Сервисы', name: 'Twitch', host: 'gql.twitch.tv', port: 443 },
-  { g: 'Сервисы', name: 'Instagram', host: 'i.instagram.com', port: 443 },
-  { g: 'Сервисы', name: 'Spotify', host: 'api.spotify.com', port: 443 },
-  { g: 'Сервисы', name: 'SoundCloud', host: 'api-v2.soundcloud.com', port: 443 },
-  { g: 'Сервисы', name: 'Cloudflare 1.1.1.1', host: 'one.one.one.one', port: 443 },
-  { g: 'Сервисы', name: 'GitHub', host: 'api.github.com', port: 443 },
-  { g: 'Сервисы', name: 'ChatGPT', host: 'chatgpt.com', port: 443 },
-  { g: 'Сервисы', name: 'Notion', host: 'www.notion.so', port: 443 },
+  // Хост — это то, что реально проверяется на связь, поэтому здесь стоят
+  // рабочие адреса сервисов, а не сайты-витрины: витрина может открываться
+  // и тогда, когда игра не заходит. `a` — синонимы для поиска: как сервис
+  // называют вслух и по-русски.
+  { g: 'Игры', name: 'Counter-Strike 2', host: 'cm.steampowered.com', port: 27017, a: 'cs2 кс контра ксго csgo' },
+  { g: 'Игры', name: 'Dota 2', host: 'api.steampowered.com', port: 443, a: 'дота dota' },
+  { g: 'Игры', name: 'Valorant', host: 'glz-ru-1.ru.a.pvp.net', port: 443, a: 'валорант вало' },
+  { g: 'Игры', name: 'League of Legends', host: 'euw.api.riotgames.com', port: 443, a: 'лол lol лига' },
+  { g: 'Игры', name: 'Fortnite', host: 'fortnite-public-service-prod11.ol.epicgames.com', port: 443, a: 'фортнайт фн' },
+  { g: 'Игры', name: 'Apex Legends', host: 'r5-crossplay.r5prod.stryder.respawn.com', port: 443, a: 'апекс' },
+  { g: 'Игры', name: 'Overwatch 2', host: 'eu.actual.battle.net', port: 1119, a: 'овервотч ow' },
+  { g: 'Игры', name: 'Rocket League', host: 'api.rlpp.psynet.gg', port: 443, a: 'ракетлига рл' },
+  { g: 'Игры', name: 'Roblox', host: 'apis.roblox.com', port: 443, a: 'роблокс' },
+  { g: 'Игры', name: 'Minecraft', host: 'sessionserver.mojang.com', port: 443, a: 'майнкрафт майн mojang' },
+  { g: 'Игры', name: 'Genshin Impact', host: 'sdk-os-static.hoyoverse.com', port: 443, a: 'геншин хойо hoyoverse' },
+  { g: 'Игры', name: 'Honkai: Star Rail', host: 'api-os-takumi.hoyoverse.com', port: 443, a: 'хонкай хср hsr' },
+  { g: 'Игры', name: 'PUBG', host: 'api.pubg.com', port: 443, a: 'пабг пубг' },
+  { g: 'Игры', name: 'Escape from Tarkov', host: 'prod.escapefromtarkov.com', port: 443, a: 'тарков eft' },
+  { g: 'Игры', name: 'GTA Online', host: 'prod.ros.rockstargames.com', port: 443, a: 'гта рокстар rockstar' },
+  { g: 'Игры', name: 'Call of Duty', host: 'profile.callofduty.com', port: 443, a: 'колда cod warzone варзон' },
+  { g: 'Игры', name: 'Destiny 2', host: 'www.bungie.net', port: 443, a: 'дестини bungie' },
+  { g: 'Игры', name: 'Warframe', host: 'api.warframe.com', port: 443, a: 'варфрейм' },
+  { g: 'Игры', name: 'War Thunder', host: 'login.gaijin.net', port: 443, a: 'вартандер гайдзин gaijin' },
+  { g: 'Игры', name: 'Path of Exile', host: 'www.pathofexile.com', port: 443, a: 'поэ poe' },
+  { g: 'Игры', name: 'Dead by Daylight', host: 'latest.live.bhvrdbd.com', port: 443, a: 'дбд dbd' },
+  { g: 'Игры', name: 'Rust', host: 'api.facepunch.com', port: 443, a: 'раст facepunch' },
+  { g: 'Игры', name: 'osu', host: 'osu.ppy.sh', port: 443, a: 'осу' },
+
+  { g: 'Платформы', name: 'Steam', host: 'api.steampowered.com', port: 443, a: 'стим' },
+  { g: 'Платформы', name: 'Steam Community', host: 'steamcommunity.com', port: 443, a: 'стим комьюнити профиль' },
+  { g: 'Платформы', name: 'Steam Store', host: 'store.steampowered.com', port: 443, a: 'стим магазин' },
+  { g: 'Платформы', name: 'Epic Online', host: 'api.epicgames.dev', port: 443, a: 'эпик epic' },
+  { g: 'Платформы', name: 'Riot', host: 'auth.riotgames.com', port: 443, a: 'риот' },
+  { g: 'Платформы', name: 'Battle.net', host: 'us.actual.battle.net', port: 1119, a: 'близзард blizzard батлнет' },
+  { g: 'Платформы', name: 'Xbox Live', host: 'title.mgt.xboxlive.com', port: 443, a: 'иксбокс хбокс' },
+  { g: 'Платформы', name: 'PlayStation Network', host: 'auth.api.sonyentertainmentnetwork.com', port: 443, a: 'плейстейшн псн psn sony' },
+  { g: 'Платформы', name: 'Nintendo', host: 'accounts.nintendo.com', port: 443, a: 'нинтендо свитч switch' },
+  { g: 'Платформы', name: 'EA App', host: 'accounts.ea.com', port: 443, a: 'еа origin ориджин' },
+  { g: 'Платформы', name: 'Ubisoft Connect', host: 'public-ubiservices.ubi.com', port: 443, a: 'юбисофт uplay юплей' },
+  { g: 'Платформы', name: 'GOG', host: 'www.gog.com', port: 443, a: 'гог' },
+  { g: 'Платформы', name: 'itch.io', host: 'itch.io', port: 443, a: 'итч' },
+
+  { g: 'Сервисы', name: 'Twitch', host: 'gql.twitch.tv', port: 443, a: 'твич' },
+  { g: 'Сервисы', name: 'Telegram API', host: 'api.telegram.org', port: 443, a: 'телеграм тг' },
+  { g: 'Сервисы', name: 'Instagram', host: 'i.instagram.com', port: 443, a: 'инстаграм инста' },
+  { g: 'Сервисы', name: 'Facebook', host: 'graph.facebook.com', port: 443, a: 'фейсбук фб' },
+  { g: 'Сервисы', name: 'X (Twitter)', host: 'api.x.com', port: 443, a: 'твиттер икс twitter' },
+  { g: 'Сервисы', name: 'TikTok', host: 'www.tiktok.com', port: 443, a: 'тикток' },
+  { g: 'Сервисы', name: 'Reddit', host: 'www.reddit.com', port: 443, a: 'реддит' },
+  { g: 'Сервисы', name: 'Spotify', host: 'api.spotify.com', port: 443, a: 'спотифай' },
+  { g: 'Сервисы', name: 'SoundCloud', host: 'api-v2.soundcloud.com', port: 443, a: 'саундклауд' },
+  { g: 'Сервисы', name: 'Netflix', host: 'www.netflix.com', port: 443, a: 'нетфликс' },
+  { g: 'Сервисы', name: 'Signal', host: 'chat.signal.org', port: 443, a: 'сигнал' },
+  { g: 'Сервисы', name: 'WhatsApp', host: 'web.whatsapp.com', port: 443, a: 'вотсап ватсап' },
+  { g: 'Сервисы', name: 'Zoom', host: 'zoom.us', port: 443, a: 'зум' },
+  { g: 'Сервисы', name: 'Slack', host: 'slack.com', port: 443, a: 'слак' },
+  { g: 'Сервисы', name: 'Figma', host: 'www.figma.com', port: 443, a: 'фигма' },
+  { g: 'Сервисы', name: 'Notion', host: 'www.notion.so', port: 443, a: 'ноушен' },
+  { g: 'Сервисы', name: 'GitHub', host: 'api.github.com', port: 443, a: 'гитхаб гит' },
+  { g: 'Сервисы', name: 'npm', host: 'registry.npmjs.org', port: 443, a: 'нпм' },
+  { g: 'Сервисы', name: 'PyPI', host: 'pypi.org', port: 443, a: 'пипи питон' },
+  { g: 'Сервисы', name: 'Docker Hub', host: 'registry-1.docker.io', port: 443, a: 'докер' },
+  { g: 'Сервисы', name: 'Hugging Face', host: 'huggingface.co', port: 443, a: 'хаггинг' },
+  { g: 'Сервисы', name: 'ChatGPT', host: 'chatgpt.com', port: 443, a: 'чатгпт гпт openai' },
+  { g: 'Сервисы', name: 'Claude', host: 'api.anthropic.com', port: 443, a: 'клод anthropic' },
+  { g: 'Сервисы', name: 'Proton Mail', host: 'mail.proton.me', port: 443, a: 'протон' },
+  { g: 'Сервисы', name: 'Cloudflare 1.1.1.1', host: 'one.one.one.one', port: 443, a: 'клаудфлер dns днс' },
 ];
 
 let cmdItems = [];
@@ -1316,10 +1353,38 @@ function parseTarget(raw) {
   return { host, port, suggested: label.charAt(0).toUpperCase() + label.slice(1) };
 }
 
+// Насколько строка каталога подходит запросу. Ноль — не подходит.
+//
+// Раньше это была подстрока по имени и хосту. Она молчала на «кс» и «дота»,
+// как их и набирают, зато охотно ставила случайное совпадение в длинном
+// служебном хосте выше точного совпадения по названию. Порядок здесь — от
+// самого уверенного совпадения к самому случайному.
+function matchScore(c, q) {
+  const name = c.name.toLowerCase();
+  const host = c.host.toLowerCase();
+  const aliases = (c.a || '').toLowerCase().split(' ').filter(Boolean);
+  if (name === q) return 100;
+  if (name.startsWith(q)) return 90;
+  // С начала слова: «legends» найдёт Apex Legends, «exile» — Path of Exile.
+  if (name.split(/[\s(:.-]+/).some((w) => w.startsWith(q))) return 80;
+  if (aliases.some((w) => w === q)) return 75;
+  if (aliases.some((w) => w.startsWith(q))) return 70;
+  if (name.includes(q)) return 60;
+  if (host.startsWith(q)) return 50;
+  if (host.includes(q)) return 40;
+  return 0;
+}
+
 function buildCmdItems(query) {
   const q = query.trim().toLowerCase();
   const have = new Set(knownTargets.map((t) => `${t.host}:${t.port}`));
-  const list = CATALOG.filter((c) => !q || c.name.toLowerCase().includes(q) || c.host.includes(q)).map((c) => ({
+  const matched = q
+    ? CATALOG.map((c) => ({ c, s: matchScore(c, q) }))
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s || a.c.name.localeCompare(b.c.name, 'ru'))
+        .map((x) => x.c)
+    : CATALOG;
+  const list = matched.map((c) => ({
     ...c,
     added: have.has(`${c.host}:${c.port}`),
   }));
@@ -1358,7 +1423,7 @@ function renderCmdList() {
         .map(
           ({ it, i }) => `
         <div class="cmd-item${i === cmdIdx ? ' active' : ''}" data-i="${i}">
-          <span class="cmd-initial">${esc((it.custom ? it.suggested : it.name).charAt(0).toUpperCase())}</span>
+          <span class="cmd-initial" data-host="${esc(it.host)}">${esc((it.custom ? it.suggested : it.name).charAt(0).toUpperCase())}</span>
           <div class="cmd-item-text">
             <div class="cmd-item-name">${esc(it.custom ? it.suggested : it.name)}</div>
             <div class="cmd-item-host">${esc(it.host)}:${it.port}</div>
@@ -1378,6 +1443,55 @@ function renderCmdList() {
   });
   const active = box.querySelector('.cmd-item.active');
   if (active) active.scrollIntoView({ block: 'nearest' });
+  loadFavicons(box);
+}
+
+// Иконки сервисов.
+//
+// Только для строк, которые сейчас на экране, и по одной: каждая — поход в
+// сеть через curl, а список перерисовывается на каждое нажатие клавиши.
+// Ответ кладём в кэш процесса, поэтому повторный показ той же строки уже
+// ничего не спрашивает; на диске кэш держит Rust, так что и следующий
+// запуск программы обойдётся без сети.
+const faviconCache = new Map(); // host -> data-URI, null (не нашлось) или Promise
+
+// То, что пришло из сети, попадает в url() внутри style. Base64 не может
+// содержать кавычек, но проверяем форму явно, а не полагаемся на это.
+const SAFE_ICON = /^data:image\/[a-z.+-]+;base64,[A-Za-z0-9+/=]+$/;
+
+function paintFavicon(host, uri) {
+  if (!uri || !SAFE_ICON.test(uri)) return;
+  document.querySelectorAll('.cmd-initial').forEach((slot) => {
+    if (slot.dataset.host !== host) return;
+    slot.style.backgroundImage = `url("${uri}")`;
+    slot.classList.add('has-icon');
+    slot.textContent = '';
+  });
+}
+
+function loadFavicons(box) {
+  box.querySelectorAll('.cmd-initial').forEach((slot) => {
+    const host = slot.dataset.host;
+    if (!host) return;
+    const cached = faviconCache.get(host);
+    if (cached === null || cached instanceof Promise) return;
+    if (typeof cached === 'string') {
+      paintFavicon(host, cached);
+      return;
+    }
+    const p = window.zapret
+      .getFavicon(host)
+      .then((r) => {
+        const uri = r && r.ok ? r.dataUri : null;
+        faviconCache.set(host, uri);
+        paintFavicon(host, uri);
+      })
+      .catch(() => {
+        // Иконка — украшение: не нашлась, значит остаётся буква.
+        faviconCache.set(host, null);
+      });
+    faviconCache.set(host, p);
+  });
 }
 
 async function cmdPick(it) {

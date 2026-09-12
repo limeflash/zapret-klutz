@@ -13,6 +13,10 @@
   window.zapret = {
     copyText: (text) => invoke('copy_text', { text }),
 
+    // Возвращает { ok, dataUri }. Картинку качает и проверяет Rust —
+    // сюда приходит готовый data-URI, окно в сеть не ходит.
+    getFavicon: (host) => invoke('get_favicon', { host }),
+
     // Перетаскивание идёт не через DOM: WebView2 не даёт настоящий путь
     // (File.path — свойство Electron, здесь его нет), а Tauri перехватывает
     // drop сам и оставляет dataTransfer.files пустым. Настоящие пути

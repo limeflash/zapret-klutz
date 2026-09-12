@@ -494,6 +494,25 @@ fn run_tests_inner(
     }
 }
 
+/// Иконка сервиса для списка поиска. Отдельной командой, а не вместе с
+/// каталогом: иконок десятки, каждая — поход в сеть, и ждать их все ради
+/// показа списка нельзя. Окно запрашивает их по одной, когда строка уже
+/// нарисована.
+#[derive(Debug, Serialize)]
+pub struct Favicon {
+    pub ok: bool,
+    #[serde(rename = "dataUri")]
+    pub data_uri: Option<String>,
+}
+
+#[tauri::command(async)]
+pub fn get_favicon(app: AppHandle, host: String) -> Favicon {
+    match crate::favicon::get(&app, &host) {
+        Ok(Some(uri)) => Favicon { ok: true, data_uri: Some(uri) },
+        _ => Favicon { ok: false, data_uri: None },
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct LastResults {
     ok: bool,
