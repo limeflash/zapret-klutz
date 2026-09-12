@@ -96,6 +96,7 @@
       return () => un.then((f) => f());
     },
     scanGameTraffic: (images, seconds) => invoke('scan_game_traffic', { images, seconds: seconds || null }),
+    scanGameFromLog: (seconds) => invoke('scan_game_from_log', { seconds: seconds || null }),
     clearGameIps: () => invoke('clear_game_ips'),
     getExtraStrategies: () => invoke('get_extra_strategies'),
     generateExtraStrategies: (template) => invoke('generate_extra_strategies', { template: template || null }),

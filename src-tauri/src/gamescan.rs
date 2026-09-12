@@ -412,6 +412,85 @@ pub fn clear_ips(root: &std::path::Path) -> Result<(), String> {
     std::fs::write(&list, merge_block(&existing, &[])).map_err(|e| e.to_string())
 }
 
+// ─────────── сбор из лога самого winws ───────────
+//
+// Зачем это отдельно от netstat. Таблица сокетов показывает удалённый адрес
+// только у СОЕДИНЁННЫХ сокетов. Игровой матч так не ходит: он шлёт пакеты
+// через sendto, и в таблице напротив такого сокета стоит «*:*». Замерено на
+// живой машине: из 77 строк UDP удалённый адрес был у двух, и одна из них
+// петля. То есть главный трафик игры этим способом не увидеть в принципе.
+//
+// А winws сидит на WinDivert и видит сами пакеты. С `--debug` он печатает
+// каждый, который попал под `--wf-*`, — включая тот самый несоединённый UDP.
+// Klutz его вывод и так перехватывает, остаётся разобрать строки.
+
+/// Адрес назначения из строки лога winws, если он там есть.
+///
+/// Две формы, обе встречаются в его выводе:
+///   `TCP [1.2.3.4]:52000 => [5.6.7.8]:27015 : ...`
+///   `dpi desync src=1.2.3.4:52000 dst=5.6.7.8:27015`
+/// Разбираем обе и не привязываемся к остальному тексту: он меняется от
+/// версии к версии, а адрес — нет.
+pub fn parse_log_addr(line: &str) -> Option<(IpAddr, u16)> {
+    if let Some(rest) = line.split("dst=").nth(1) {
+        let token = rest.split_whitespace().next()?;
+        if let Some(a) = split_addr(token) {
+            return Some(a);
+        }
+    }
+    if let Some(rest) = line.split("=> ").nth(1) {
+        let token = rest.split_whitespace().next()?;
+        if let Some(a) = split_addr(token) {
+            return Some(a);
+        }
+    }
+    None
+}
+
+/// Копилка адресов, пока идёт сбор из лога. `None` — сбор не идёт, и тогда
+/// строки лога через неё просто пролетают.
+pub static HARVEST: std::sync::Mutex<Option<BTreeSet<String>>> = std::sync::Mutex::new(None);
+
+pub fn harvest_start() {
+    *HARVEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(BTreeSet::new());
+}
+
+/// Останавливает сбор и отдаёт накопленное.
+pub fn harvest_stop() -> Vec<String> {
+    HARVEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .map(|s| s.into_iter().collect())
+        .unwrap_or_default()
+}
+
+pub fn harvest_active() -> bool {
+    HARVEST.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+/// Сколько адресов накопилось прямо сейчас.
+pub fn harvest_len() -> usize {
+    HARVEST
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|s| s.len())
+        .unwrap_or(0)
+}
+
+/// Скармливает строку лога копилке. Зовётся на каждой строке winws, поэтому
+/// сперва самая дешёвая проверка — идёт ли сбор вообще.
+pub fn harvest_line(line: &str) {
+    let mut g = HARVEST.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(set) = g.as_mut() else { return };
+    if let Some((ip, _port)) = parse_log_addr(line) {
+        if is_external(&ip) {
+            set.insert(ip.to_string());
+        }
+    }
+}
+
 // ─────────── блок адресов игр внутри ipset-all.txt ───────────
 //
 // Список адресов у zapret один — `lists/ipset-all.txt`, и его же целиком
@@ -740,6 +819,58 @@ mod unit_tests {
         assert!(!стало.contains("klutz"), "{стало}");
         // И на совсем пустом входе не появляется мусора.
         assert_eq!(merge_block("", &[]), "");
+    }
+
+    #[test]
+    fn адрес_из_строки_лога_winws() {
+        // Форма conntrack.
+        let (ip, port) = parse_log_addr("UDP [192.168.1.5]:52000 => [162.159.135.232]:27015 : t0=1").unwrap();
+        assert_eq!(ip.to_string(), "162.159.135.232");
+        assert_eq!(port, 27015);
+
+        // Форма «dpi desync». Она важнее: у неё dst стоит явно, и её мы
+        // проверяем первой.
+        let (ip, port) = parse_log_addr("dpi desync src=192.168.1.5:52000 dst=104.16.0.1:443").unwrap();
+        assert_eq!(ip.to_string(), "104.16.0.1");
+        assert_eq!(port, 443);
+
+        // IPv6 в скобках.
+        let (ip, _) = parse_log_addr("TCP [fe80::1]:1 => [2606:4700::1]:443 : x").unwrap();
+        assert_eq!(ip.to_string(), "2606:4700::1");
+    }
+
+    #[test]
+    fn посторонние_строки_лога_не_дают_адресов() {
+        for line in [
+            "",
+            "packet contains TLS ClientHello",
+            "Window size change 64240 => 512",
+            "rewrite original packet ttl 128 => 64",
+            "sending 6 dups with ttl rewrite 128 => 64",
+            "hostname: discord.com",
+        ] {
+            assert_eq!(parse_log_addr(line), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn копилка_берёт_только_внешние_и_только_когда_включена() {
+        // Выключена — строки пролетают мимо.
+        assert!(!harvest_active());
+        harvest_line("UDP [1.1.1.1]:1 => [104.16.0.1]:27015 : x");
+        assert_eq!(harvest_len(), 0);
+
+        harvest_start();
+        assert!(harvest_active());
+        harvest_line("UDP [1.1.1.1]:1 => [104.16.0.1]:27015 : x");
+        // Домашний роутер в обход попасть не должен.
+        harvest_line("UDP [1.1.1.1]:1 => [192.168.1.1]:27015 : x");
+        harvest_line("мусор");
+        assert_eq!(harvest_len(), 1);
+
+        let got = harvest_stop();
+        assert_eq!(got, vec!["104.16.0.1"]);
+        assert!(!harvest_active(), "после остановки сбор не идёт");
     }
 
     /// Живая проверка: `cargo test -- --ignored живой_скан --nocapture`.

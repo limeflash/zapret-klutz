@@ -129,6 +129,11 @@ fn push_log_lines(app: &AppHandle, state: &AppState, chunk: &str) {
     if lines.is_empty() {
         return;
     }
+    // Пока идёт сбор адресов игры, каждая строка проходит через копилку.
+    // Дешевле некуда: если сбор не идёт, копилка сразу возвращается.
+    for line in &lines {
+        crate::gamescan::harvest_line(line);
+    }
     {
         let mut buf = state.winws_log.lock().unwrap();
         for line in &lines {
@@ -149,6 +154,11 @@ fn push_log_lines(app: &AppHandle, state: &AppState, chunk: &str) {
 /// null, caller falls back to the .bat" contract upstream.
 pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
+    // Во время сбора адресов winws запускается с `--debug`: только тогда он
+    // печатает пакеты, которые видит, а вместе с ними адреса игрового UDP,
+    // которых в таблице сокетов нет. Флаг живёт ровно на время сбора — вывод
+    // с ним очень обильный, держать его постоянно незачем.
+    let debug = crate::gamescan::harvest_active();
 
     // Kill whatever's running first — same "stop before start" as applyDirect().
     {
@@ -167,7 +177,10 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
     let winws_exe = root.join("bin").join("winws.exe");
     let live_logs = args.is_some() && winws_exe.exists();
 
-    if let Some(args) = args.filter(|_| winws_exe.exists()) {
+    if let Some(mut args) = args.filter(|_| winws_exe.exists()) {
+        if debug {
+            args.push("--debug".into());
+        }
         *state.winws_intentional_stop.lock().unwrap() = false;
         #[allow(unused_mut)]
         let mut cmd = Command::new(&winws_exe);

@@ -1598,6 +1598,82 @@ pub fn scan_game_traffic(
     Ok(r)
 }
 
+/// Глубокий сбор: адреса берутся из лога самого обхода.
+///
+/// Чем отличается от обычного. Обычный читает таблицу сокетов, а она
+/// показывает удалённый адрес только у соединённых. Игровой матч ходит через
+/// sendto, и напротив такого сокета стоит «*:*» — замерено: из 77 строк UDP
+/// адрес был у двух. Здесь же адреса даёт сам winws: он сидит на WinDivert и
+/// видит пакеты, а с `--debug` печатает каждый, который попал под `--wf-*`.
+///
+/// Цена — перезапуск обхода дважды: включить `--debug` и потом убрать.
+/// Держать его постоянно нельзя, вывод слишком обильный.
+#[tauri::command(async)]
+pub fn scan_game_from_log(
+    app: AppHandle,
+    state: State<AppState>,
+    seconds: Option<u64>,
+) -> Result<crate::gamescan::ScanResult, String> {
+    let root = root_of(&state).ok_or("Сначала загрузи релиз zapret.")?;
+    let active = state
+        .persisted
+        .lock()
+        .unwrap()
+        .active_config
+        .clone()
+        .ok_or("Сначала включи обход — собирать не из чего.")?;
+    if !crate::winws::is_winws_running() {
+        return Err("Обход выключен. Включи его, запусти игру и повтори.".into());
+    }
+
+    let secs = seconds.unwrap_or(30).clamp(5, 300);
+    crate::gamescan::harvest_start();
+    // Перезапуск с --debug. Если он не удался, копилку обязательно снимаем:
+    // иначе следующий штатный запуск тоже уехал бы в отладочный режим.
+    if let Err(e) = crate::monitor::apply_config(&app, &active) {
+        let _ = crate::gamescan::harvest_stop();
+        return Err(format!("Не удалось перезапустить обход: {e}"));
+    }
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(secs) {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let _ = app.emit(
+            "game-scan",
+            serde_json::json!({ "proc": "обход", "found": crate::gamescan::harvest_len() }),
+        );
+    }
+
+    let addrs = crate::gamescan::harvest_stop();
+    // Снимаем --debug тем же путём: копилка уже выключена, значит запуск
+    // будет обычным.
+    let _ = crate::monitor::apply_config(&app, &active);
+
+    let note = if addrs.is_empty() {
+        "обход за это время не увидел ни одного адреса. Проверь, что игра работает \
+         и что Game Filter включён: без него игровые порты мимо обхода и идут"
+            .to_string()
+    } else {
+        format!(
+            "собрано адресов: {}. Взяты из пакетов, которые видел сам обход, — сюда \
+             попадает и игровой UDP, невидимый в таблице соединений",
+            addrs.len()
+        )
+    };
+    if !addrs.is_empty() {
+        crate::gamescan::save_ips(&root, &addrs)?;
+        let _ = crate::monitor::apply_config(&app, &active);
+    }
+    Ok(crate::gamescan::ScanResult {
+        running: true,
+        addrs,
+        tcp_ports: Vec::new(),
+        udp_ports: Vec::new(),
+        ticks: secs as u32,
+        note,
+    })
+}
+
 #[tauri::command(async)]
 pub fn clear_game_ips(state: State<AppState>) -> SimpleResult {
     let Some(root) = root_of(&state) else {

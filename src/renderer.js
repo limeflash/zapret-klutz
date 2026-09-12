@@ -2742,6 +2742,37 @@ async function loadGames() {
         : 'Запусти игру, зайди в меню или начни матч и нажми «Собрать адреса». Полминуты Klutz смотрит, куда ходит процесс игры, и складывает найденное в список, по которому работает Game Filter.';
 }
 
+$('gameScanDeepBtn').onclick = async () => {
+    const ok = await showConfirm(
+        'Глубокий сбор берёт адреса из пакетов, которые видит сам обход. Так виден и ' +
+            'игровой UDP — тот, которого нет в таблице соединений, а это как раз трафик ' +
+            'матча.\n\n' +
+            'Обход при этом дважды перезапустится: включить подробный режим и убрать его. ' +
+            'Связь на секунду прервётся. Игра должна работать всё это время.\n\n' +
+            'Game Filter должен быть включён, иначе игровые порты идут мимо обхода и ' +
+            'собирать будет нечего.'
+    );
+    if (!ok) return;
+
+    gameScanBusy = true;
+    $('gameScanSub').textContent = 'слушаю обход…';
+    $('gameScanHint').textContent = 'Полминуты. Играй, не закрывай игру.';
+    const stopProgress = window.zapret.onGameScan((p) => {
+        if (gameScanBusy) $('gameScanHint').textContent = `Адресов: ${p.found}. Играй, не закрывай игру.`;
+    });
+    let note = '';
+    try {
+        const r = await window.zapret.scanGameFromLog(30);
+        note = r.note;
+    } catch (e) {
+        note = typeof e === 'string' ? e : 'Не удалось собрать.';
+    }
+    stopProgress();
+    gameScanBusy = false;
+    await loadGames();
+    $('gameScanHint').textContent = note;
+};
+
 $('gameScanClearBtn').onclick = async () => {
     const было = (await window.zapret.getGameScan()).saved;
     if (!(await showConfirm(`Убрать собранные адреса игр (${было})?`))) return;
