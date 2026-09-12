@@ -4,6 +4,16 @@
 сервисов на Windows. Управляет [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube)
 и встроенным [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) для Telegram.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/main-dark.png">
+  <img alt="Главная: обход работает, Discord и YouTube отвечают" src="docs/main-light.png">
+</picture>
+
+Одна кнопка. Klutz сам подбирает рабочую стратегию, следит за связью и
+переключается, если она пропала.
+
+<img alt="Подбор стратегии: перебор конфигов по целям обхода" src="docs/autopick.png">
+
 Телеметрии нет: Klutz не собирает о вас ничего и никуда не отправляет. Наружу
 ходит только за обновлениями — к `api.github.com` и `raw.githubusercontent.com`
 за версиями Klutz, zapret и TgWsProxy, за списком ipset и за рекомендованным
