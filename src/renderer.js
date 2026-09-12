@@ -147,12 +147,6 @@ function deriveGroup(name) {
   return p;
 }
 
-// Словами, а не процентом: «22 %» требует знать, из чего доля, а вердикт
-// читается сразу. Пороги те же, что у verdictColor.
-function verdictLabel(score) {
-  return score >= 0.85 ? 'Пробивает' : score >= 0.4 ? 'Частично' : 'Не пробивает';
-}
-
 function formatUptime(startedAt) {
   if (!startedAt) return '—';
   const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
@@ -981,7 +975,7 @@ function renderConfigList() {
         const verdict = testedRow
           ? (() => {
               const score = verdictFor(testedRow, lastResultsCache.mode).score;
-              return `<span class="cfg-verdict" style="color:${verdictColor(score)}" title="Доля проверенных целей, которые ответили: ${Math.round(score * 100)}%">${verdictLabel(score)}</span>`;
+              return `<span class="cfg-tag" style="color:${verdictColor(score)}" title="Доля проверенных целей, которые ответили">${Math.round(score * 100)}%</span>`;
             })()
           : '';
 
