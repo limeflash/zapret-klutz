@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::probe::{
-    classify_path, first_ip, http_probe_pinned, tcp_probe, FailureCode, PathVerdict, NEUTRAL_SNI,
+    classify_path, http_probe_pinned, resolve_ips, tcp_probe, tunnel_hint, FailureCode,
+    PathVerdict, NEUTRAL_SNI,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -80,8 +81,20 @@ fn probe_target(t: &Target) -> TargetResult {
         // Основную пробу тоже прибиваем к адресу: сравнивать имена имеет
         // смысл только на ОДНОМ адресе, иначе разницу объясняют разные
         // серверы, а не блокировка.
-        let ip = first_ip(&t.host, t.port);
-        let main = http_probe_pinned(&t.host, t.port, ip.as_deref(), 4);
+        // Перебираем адреса, пока какой-нибудь не ответит. Молчат все —
+        // берём последний замер и его же адрес для контроля: вывод о
+        // блокировке делаем, только исчерпав список, а не на первом edge.
+        let ips = resolve_ips(&t.host, t.port);
+        let mut used: Option<String> = None;
+        let mut main = http_probe_pinned(&t.host, t.port, None, 4);
+        for ip in &ips {
+            main = http_probe_pinned(&t.host, t.port, Some(ip), 4);
+            used = Some(ip.clone());
+            if main.ok {
+                break;
+            }
+        }
+        let ip = used;
 
         let (verdict, why) = if main.code.needs_control() {
             // Адреса нет — контроль невозможен. Передаём None, а не «контроль
@@ -93,6 +106,14 @@ fn probe_target(t: &Target) -> TargetResult {
             classify_path(main.ok, main.code, control)
         } else {
             classify_path(main.ok, main.code, None)
+        };
+        // Если имя разрешилось во что-то местное, всё измеренное выше — про
+        // туннель, а не про провайдера. Сказать это надо и на успехе:
+        // «работает» через чужой туннель не означает, что работает обход.
+        let why = match ip.as_deref().and_then(tunnel_hint) {
+            Some(hint) if why.is_empty() => hint.to_string(),
+            Some(hint) => format!("{why}. Причём {hint} — так что замер, возможно, не о провайдере"),
+            None => why,
         };
         (main, "http", verdict, why)
     } else {
