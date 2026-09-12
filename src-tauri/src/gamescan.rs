@@ -548,6 +548,37 @@ impl Target {
             Target::Skip => "ipset-exclude-user.txt",
         }
     }
+
+    fn opposite(self) -> Target {
+        match self {
+            Target::Bypass => Target::Skip,
+            Target::Skip => Target::Bypass,
+        }
+    }
+}
+
+/// Убирает перечисленные адреса из нашего блока в другом списке.
+///
+/// Чужие строки не трогает: в этих файлах бывает и не наше.
+fn remove_from(root: &std::path::Path, target: Target, addrs: &[String]) -> Result<(), String> {
+    let list = root.join("lists").join(target.file());
+    let Ok(existing) = std::fs::read_to_string(&list) else {
+        return Ok(());
+    };
+    let mine = extract_block(&existing);
+    let rest: Vec<String> = mine.iter().filter(|a| !addrs.contains(a)).cloned().collect();
+    if rest.len() == mine.len() {
+        return Ok(());
+    }
+    // Пустой `ipset-all.txt` значит «применяться ко всему», поэтому там на
+    // месте пустоты обязана остаться заглушка. Пустой список исключений
+    // значит «ничего не исключать» — заглушка в нём только путала бы.
+    let text = if rest.is_empty() && target == Target::Skip {
+        without_block(&existing)
+    } else {
+        merge_block(&existing, &rest)
+    };
+    std::fs::write(&list, text).map_err(|e| e.to_string())
 }
 
 /// Кладёт собранные адреса в список релиза, не тронув чужие строки.
@@ -562,6 +593,13 @@ pub fn save_ips_to(
     // отдельно меню, отдельно матч, отдельно голосовой чат.
     let mut all: BTreeSet<String> = extract_block(&existing).into_iter().collect();
     for a in addrs {
+        // Готовую сеть спрашивать не о чем: так приходит перенос из списка в
+        // список, где адреса уже развёрнуты. Без этой проверки «Не трогать»
+        // ходило в справочник по разу на каждую из 37 сетей — впустую.
+        if a.contains('/') {
+            all.insert(a.clone());
+            continue;
+        }
         // Сети оператора, если удалось выяснить; иначе /24 вокруг адреса.
         // Один адрес одного оператора спрашиваем один раз: у пойманных
         // адресов оператор обычно общий.
@@ -575,6 +613,15 @@ pub fn save_ips_to(
     let all: Vec<String> = all.into_iter().collect();
     let merged = merge_block(&existing, &all);
     std::fs::write(&list, merged).map_err(|e| e.to_string())?;
+    // Один адрес не может значить «обходить» и «не трогать» одновременно.
+    // Оба файла уходят в winws в ОДНУ группу аргументов: рядом с
+    // `--ipset=ipset-all.txt` всегда стоит `--ipset-exclude=ipset-exclude-user.txt`,
+    // в игровых группах тоже. Попавший в оба адрес просто выпадает из обхода.
+    //
+    // Замерено на живой машине: после «Не трогать», а следом «Собрать
+    // адреса» все 37 сетей Riot лежали в обоих файлах разом. Интерфейс
+    // показывал «37 адресов», а игровой профиль не применялся к ним вовсе.
+    remove_from(root, target.opposite(), &all)?;
     Ok(all.len())
 }
 
@@ -1244,6 +1291,43 @@ mod unit_tests {
         let cf = operator_prefixes("104.29.153.1");
         println!("Cloudflare: {:?}", cf.as_ref().map(|v| v.len()));
         assert!(cf.is_none(), "облако не должно разворачиваться");
+    }
+
+    #[test]
+    fn адрес_не_лежит_в_обоих_списках_сразу() {
+        // Списки противоположны по смыслу, и winws читает их вместе. Адрес,
+        // попавший в оба, не обходится — а человек видит его в собранных и
+        // ждёт обратного.
+        let root = std::env::temp_dir().join(format!("klutz-both-{}", std::process::id()));
+        let lists = root.join("lists");
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::write(lists.join("ipset-all.txt"), format!("{EMPTY_STUB}\r\n")).unwrap();
+        std::fs::write(lists.join("ipset-exclude-user.txt"), "").unwrap();
+
+        // Сети приходят готовыми, справочник для них не нужен — тест офлайн.
+        let nets = vec!["162.249.72.0/21".to_string(), "185.40.64.0/22".to_string()];
+
+        save_ips_to(&root, Target::Bypass, &nets).unwrap();
+        assert_eq!(saved_ips_in(&root, Target::Bypass), nets);
+        assert!(saved_ips_in(&root, Target::Skip).is_empty());
+
+        // «Не трогать»: сети переезжают, и в обходе их не остаётся.
+        save_ips_to(&root, Target::Skip, &nets).unwrap();
+        assert_eq!(saved_ips_in(&root, Target::Skip), nets);
+        assert!(saved_ips_in(&root, Target::Bypass).is_empty(), "остались в обходе");
+        // Пустой ipset-all значит «применяться ко всему» — заглушка обязана
+        // вернуться на место.
+        let all = std::fs::read_to_string(lists.join("ipset-all.txt")).unwrap();
+        assert!(all.contains(EMPTY_STUB), "{all:?}");
+        // А пустой список исключений заглушки не требует.
+        let skip = std::fs::read_to_string(lists.join("ipset-exclude-user.txt")).unwrap();
+        assert!(!skip.contains(EMPTY_STUB), "{skip:?}");
+
+        // И обратно: сбор забирает их из исключений.
+        save_ips_to(&root, Target::Bypass, &nets).unwrap();
+        assert!(saved_ips_in(&root, Target::Skip).is_empty(), "остались в исключениях");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

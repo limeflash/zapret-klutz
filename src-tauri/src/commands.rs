@@ -1711,10 +1711,10 @@ pub fn exclude_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult 
     if addrs.is_empty() {
         return err("Собранных адресов нет — переносить нечего.");
     }
+    // Отдельная очистка списка обхода здесь больше не нужна: запись в один
+    // список сама убирает эти адреса из другого. Раньше очисток было две —
+    // и ровно то, что они делали порознь, разъезжалось при следующем сборе.
     if let Err(e) = crate::gamescan::save_ips_to(&root, crate::gamescan::Target::Skip, &addrs) {
-        return err(e);
-    }
-    if let Err(e) = crate::gamescan::clear_ips_in(&root, crate::gamescan::Target::Bypass) {
         return err(e);
     }
     // Списки читаются при запуске, иначе перенос ничего не изменит.
