@@ -1692,6 +1692,38 @@ pub fn scan_game_from_log(
     })
 }
 
+/// Переносит собранные адреса из «обходить» в «не трогать».
+///
+/// Нужно, когда игра работает, а обход ей мешает. На живом Valorant так и
+/// вышло: серверы Riot попали в ipset-all, игровой профиль применил к ним
+/// `fake` с двенадцатью повторами, и игра показала высокий пинг с ошибкой
+/// сети. Адреса при этом собраны правильно — просто применять их надо в
+/// другую сторону.
+#[tauri::command(async)]
+pub fn exclude_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    let addrs = crate::gamescan::saved_ips_in(&root, crate::gamescan::Target::Bypass);
+    if addrs.is_empty() {
+        return err("Собранных адресов нет — переносить нечего.");
+    }
+    if let Err(e) = crate::gamescan::save_ips_to(&root, crate::gamescan::Target::Skip, &addrs) {
+        return err(e);
+    }
+    if let Err(e) = crate::gamescan::clear_ips_in(&root, crate::gamescan::Target::Bypass) {
+        return err(e);
+    }
+    // Списки читаются при запуске, иначе перенос ничего не изменит.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    ok()
+}
+
 #[tauri::command(async)]
 pub fn clear_game_ips(state: State<AppState>) -> SimpleResult {
     let Some(root) = root_of(&state) else {

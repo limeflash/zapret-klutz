@@ -426,9 +426,44 @@ pub fn to_subnet(ip: &str) -> String {
     }
 }
 
+/// Куда класть собранные адреса.
+///
+/// У одних и тех же адресов два противоположных применения, и выбирать
+/// между ними должен человек, а не мы за него:
+///
+/// * `Bypass` — игра заблокирована, обход должен до неё дотянуться. Адреса
+///   идут в `ipset-all.txt`, по которому игровой профиль и решает, к чему
+///   применяться.
+/// * `Skip` — игра работает, а обход ей мешает. Адреса идут в
+///   `ipset-exclude-user.txt`, и winws оставляет этот трафик в покое. Это
+///   и есть здешний аналог `--lua-desync=pass` из наборов zapret2, где
+///   игровой UDP Riot помечен «не трогать».
+///
+/// Второй случай не теоретический: на живом Valorant добавление серверов
+/// Riot в `ipset-all.txt` включило на них `fake` с двенадцатью повторами,
+/// и игра показала «высокий пинг» и «проблема с сетью».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Bypass,
+    Skip,
+}
+
+impl Target {
+    fn file(self) -> &'static str {
+        match self {
+            Target::Bypass => "ipset-all.txt",
+            Target::Skip => "ipset-exclude-user.txt",
+        }
+    }
+}
+
 /// Кладёт собранные адреса в список релиза, не тронув чужие строки.
-pub fn save_ips(root: &std::path::Path, addrs: &[String]) -> Result<usize, String> {
-    let list = root.join("lists").join("ipset-all.txt");
+pub fn save_ips_to(
+    root: &std::path::Path,
+    target: Target,
+    addrs: &[String],
+) -> Result<usize, String> {
+    let list = root.join("lists").join(target.file());
     let existing = std::fs::read_to_string(&list).unwrap_or_default();
     // К уже собранному добавляем, а не заменяем: сканов бывает несколько —
     // отдельно меню, отдельно матч, отдельно голосовой чат.
@@ -442,18 +477,31 @@ pub fn save_ips(root: &std::path::Path, addrs: &[String]) -> Result<usize, Strin
     Ok(all.len())
 }
 
+/// Совместимость с прежними вызовами: по умолчанию — в обход.
+pub fn save_ips(root: &std::path::Path, addrs: &[String]) -> Result<usize, String> {
+    save_ips_to(root, Target::Bypass, addrs)
+}
+
 /// Какие наши адреса сейчас в списке.
-pub fn saved_ips(root: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(root.join("lists").join("ipset-all.txt"))
+pub fn saved_ips_in(root: &std::path::Path, target: Target) -> Vec<String> {
+    std::fs::read_to_string(root.join("lists").join(target.file()))
         .map(|c| extract_block(&c))
         .unwrap_or_default()
 }
 
+pub fn saved_ips(root: &std::path::Path) -> Vec<String> {
+    saved_ips_in(root, Target::Bypass)
+}
+
 /// Убирает наш блок целиком, оставив чужое как было.
-pub fn clear_ips(root: &std::path::Path) -> Result<(), String> {
-    let list = root.join("lists").join("ipset-all.txt");
+pub fn clear_ips_in(root: &std::path::Path, target: Target) -> Result<(), String> {
+    let list = root.join("lists").join(target.file());
     let existing = std::fs::read_to_string(&list).unwrap_or_default();
     std::fs::write(&list, merge_block(&existing, &[])).map_err(|e| e.to_string())
+}
+
+pub fn clear_ips(root: &std::path::Path) -> Result<(), String> {
+    clear_ips_in(root, Target::Bypass)
 }
 
 // ─────────── сбор из лога самого winws ───────────
@@ -691,16 +739,31 @@ pub fn without_block(text: &str) -> String {
 /// Заглушку `203.0.113.113/32` выбрасываем: это «список загружен, но пуст»
 /// из TEST-NET-3, и рядом с настоящими адресами она только мешает — режим
 /// файла всё равно становится «loaded».
+/// Заглушка «список загружен, но пуст». Адрес из TEST-NET-3 (RFC 5737),
+/// который не ответит никогда.
+///
+/// Она не косметика. У winws ПУСТОЙ ipset означает «без ограничения по
+/// адресу»: профиль начинает применяться ко всему подряд на своих портах.
+/// Для игрового профиля это худший из возможных исходов — обход лезет в
+/// каждый матч. Поэтому, убрав свои адреса, мы обязаны вернуть заглушку, а
+/// не оставить файл пустым.
+pub const EMPTY_STUB: &str = "203.0.113.113/32";
+
 pub fn merge_block(existing: &str, addrs: &[String]) -> String {
+    // Заглушку выбрасываем, только когда есть чем её заменить: рядом с
+    // настоящими адресами она бессмысленна, а вместо них — необходима.
     let base: Vec<String> = without_block(existing)
         .lines()
-        .filter(|l| !l.trim().starts_with("203.0.113.113"))
+        .filter(|l| addrs.is_empty() || !l.trim().starts_with("203.0.113.113"))
         .map(|l| l.to_string())
         .collect();
     let mut out = base.join("\r\n").trim_end().to_string();
     if addrs.is_empty() {
+        // Своих адресов нет и чужих строк не осталось — возвращаем заглушку.
+        // Пустой файл тут значит «применяться ко всему», и кнопка «Убрать»
+        // молча включала бы обход на весь игровой трафик.
         if out.is_empty() {
-            return String::new();
+            return format!("{EMPTY_STUB}\r\n");
         }
         out.push_str("\r\n");
         return out;
@@ -974,14 +1037,29 @@ mod unit_tests {
     }
 
     #[test]
+    fn убрав_адреса_возвращаем_заглушку_а_не_пустоту() {
+        // Пустой ipset у winws значит «применяться ко всему». Если кнопка
+        // «Убрать» оставит файл пустым, обход полезет в каждый матч — то
+        // есть станет хуже, чем было до сбора.
+        let было = [BLOCK_START, "146.66.155.0/24", BLOCK_END].join("\r\n");
+        let стало = merge_block(&было, &[]);
+        assert!(стало.contains(EMPTY_STUB), "{стало:?}");
+        assert!(!стало.contains("146.66.155"), "{стало:?}");
+        // А когда есть настоящие адреса, заглушка не нужна.
+        let стало = merge_block(EMPTY_STUB, &["146.66.155.0/24".to_string()]);
+        assert!(!стало.contains(EMPTY_STUB), "{стало:?}");
+    }
+
+    #[test]
     fn пустой_набор_убирает_блок_целиком() {
         let текст = ["7.7.7.7", BLOCK_START, "1.2.3.4", BLOCK_END].join("\r\n");
         let стало = merge_block(&текст, &[]);
         assert!(стало.contains("7.7.7.7"), "{стало}");
         assert!(!стало.contains("1.2.3.4"), "{стало}");
         assert!(!стало.contains("klutz"), "{стало}");
-        // И на совсем пустом входе не появляется мусора.
-        assert_eq!(merge_block("", &[]), "");
+        // И на совсем пустом входе получаем заглушку, а не пустоту:
+        // пустой список у winws означает «применяться ко всему».
+        assert_eq!(merge_block("", &[]), format!("{EMPTY_STUB}\r\n"));
     }
 
     #[test]

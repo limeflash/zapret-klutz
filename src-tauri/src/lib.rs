@@ -176,6 +176,7 @@ pub fn run() {
             commands::scan_game_traffic,
             commands::scan_game_from_log,
             commands::clear_game_ips,
+            commands::exclude_game_ips,
             commands::get_extra_strategies,
             commands::generate_extra_strategies,
             commands::remove_extra_strategies,

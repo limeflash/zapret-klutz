@@ -178,6 +178,7 @@
       note: 'собрано адресов: 4. Взяты из пакетов, которые видел сам обход, — сюда попадает и игровой UDP, невидимый в таблице соединений',
     }),
     clearGameIps: noop,
+    excludeGameIps: noop,
     getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
     generateExtraStrategies: noop,
     removeExtraStrategies: noop,

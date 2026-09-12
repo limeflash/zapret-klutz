@@ -2732,6 +2732,7 @@ async function loadGames() {
         ? `${addrs.length} ${plural(addrs.length, 'адрес', 'адреса', 'адресов')}`
         : 'не собраны';
     $('gameScanClearBtn').classList.toggle('hidden', !addrs.length);
+    $('gameScanSkipBtn').classList.toggle('hidden', !addrs.length);
     const list = $('gameScanList');
     list.classList.toggle('hidden', !addrs.length);
     list.innerHTML = addrs.map((a) => `<span class="addr">${esc(a)}</span>`).join('');
@@ -2771,6 +2772,23 @@ $('gameScanDeepBtn').onclick = async () => {
     gameScanBusy = false;
     await loadGames();
     $('gameScanHint').textContent = note;
+};
+
+// Та же собранная пачка адресов, но в другую сторону: обход их не трогает.
+// Нужно, когда игра работает, а обход ей мешает — на Valorant так и вышло.
+$('gameScanSkipBtn').onclick = async () => {
+    const ok = await showConfirm(
+        'Перенести собранные адреса в список исключений?\n\n' +
+            'Обход перестанет трогать этот трафик. Так делают для игр, которые и без ' +
+            'обхода работают: в матче нет имени, прятать нечего, а лишние пакеты игра ' +
+            'воспринимает как потери — отсюда высокий пинг и обрывы.'
+    );
+    if (!ok) return;
+    const res = await window.zapret.excludeGameIps();
+    $('gameScanHint').textContent = res.ok
+        ? 'Адреса перенесены в исключения — обход их больше не трогает.'
+        : res.error || 'Не удалось перенести.';
+    await loadGames();
 };
 
 $('gameScanClearBtn').onclick = async () => {
