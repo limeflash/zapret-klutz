@@ -1527,6 +1527,10 @@ pub struct GameScanState {
     /// Когда список последний раз менялся. `null` — списка ещё нет.
     #[serde(rename = "changedAt")]
     changed_at: Option<u64>,
+    /// Адреса, разложенные по операторам: чьи они и когда пойманы.
+    groups: Vec<crate::gamescan::Group>,
+    /// Что в список не пошло и почему.
+    skipped: Vec<crate::gamescan::Skipped>,
 }
 
 #[tauri::command(async)]
@@ -1537,29 +1541,40 @@ pub fn get_game_scan(state: State<AppState>) -> GameScanState {
             addrs: Vec::new(),
             game_filter: String::new(),
             changed_at: None,
+            groups: Vec::new(),
+            skipped: Vec::new(),
         };
     };
     let addrs = crate::gamescan::saved_ips(&root);
+    let (groups, skipped) = crate::gamescan::parse_groups(
+        &std::fs::read_to_string(root.join("lists").join("ipset-all.txt")).unwrap_or_default(),
+    );
     GameScanState {
         saved: addrs.len() as u32,
         addrs,
         game_filter: crate::toggles::current_game_filter(&root),
         changed_at: crate::gamescan::changed_at(&root, crate::gamescan::Target::Bypass),
+        groups,
+        skipped,
     }
 }
 
-/// Убирает из списка один адрес.
+/// Убирает из списка перечисленные сети.
 ///
 /// Сбор берёт адреса пачкой и иногда прихватывает чужое — облачный адрес,
 /// попутную службу. Чтобы вычистить одну строку, не должно требоваться
 /// сбрасывать весь список и играть ещё один матч.
+///
+/// Принимает именно пачку, а не один адрес: снять группу оператора — это
+/// три десятка сетей разом, и по одному вызову на каждую значило бы три
+/// десятка перезапусков обхода подряд.
 #[tauri::command(async)]
-pub fn remove_game_ip(app: AppHandle, state: State<AppState>, addr: String) -> SimpleResult {
+pub fn remove_game_ips(app: AppHandle, state: State<AppState>, addrs: Vec<String>) -> SimpleResult {
     let Some(root) = root_of(&state) else {
         return err("Сначала загрузи релиз zapret.");
     };
-    match crate::gamescan::remove_from(&root, crate::gamescan::Target::Bypass, &[addr]) {
-        Ok(0) => return err("Такого адреса в списке нет."),
+    match crate::gamescan::remove_from(&root, crate::gamescan::Target::Bypass, &addrs) {
+        Ok(0) => return err("Этих адресов в списке нет."),
         Err(e) => return err(e),
         Ok(_) => {}
     }

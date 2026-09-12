@@ -152,9 +152,31 @@
       response: { verdict: 'blocked', reason: 'запрос проходит, а рукопожатие не завершается ни разу — режут ОТВЕТ', target: 0, control: 2, repeats: 2 },
     }),
     getGameScan: async () => ({
-      saved: 2,
-      addrs: ['146.66.155.0/24', '155.133.226.0/24'],
+      saved: 12,
+      addrs: [
+        '103.10.124.0/23', '146.66.152.0/22', '146.66.155.0/24', '155.133.224.0/22',
+        '155.133.226.0/24', '155.133.230.0/24', '155.133.232.0/24', '162.254.192.0/21',
+        '185.25.180.0/23', '190.217.33.0/24', '205.196.6.0/24',
+        '1.2.3.0/24',
+      ],
       gameFilter: 'tcp',
+      changedAt: Date.now() - 3 * 3600 * 1000,
+      groups: [
+        {
+          asn: '32590',
+          name: 'Valve Corporation',
+          at: Date.now() - 3 * 3600 * 1000,
+          nets: [
+            '103.10.124.0/23', '146.66.152.0/22', '146.66.155.0/24', '155.133.224.0/22',
+            '155.133.226.0/24', '155.133.230.0/24', '155.133.232.0/24', '162.254.192.0/21',
+            '185.25.180.0/23', '190.217.33.0/24', '205.196.6.0/24',
+          ],
+        },
+        { asn: '', name: '', at: 0, nets: ['1.2.3.0/24'] },
+      ],
+      skipped: [
+        { addr: '104.29.153.1', asn: '13335', name: 'Cloudflare, Inc.', prefixes: 2395 },
+      ],
     }),
     gameCandidates: async () => [
       { name: 'cs2.exe', score: 12, addrs: 3, ports: [27015, 27018] },
@@ -179,7 +201,7 @@
     }),
     clearGameIps: noop,
     excludeGameIps: noop,
-    removeGameIp: noop,
+    removeGameIps: async () => ({ ok: true }),
     getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
     generateExtraStrategies: noop,
     removeExtraStrategies: noop,

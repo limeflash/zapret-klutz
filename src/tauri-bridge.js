@@ -99,7 +99,7 @@
     scanGameFromLog: (seconds) => invoke('scan_game_from_log', { seconds: seconds || null }),
     clearGameIps: () => invoke('clear_game_ips'),
     excludeGameIps: () => invoke('exclude_game_ips'),
-    removeGameIp: (addr) => invoke('remove_game_ip', { addr }),
+    removeGameIps: (addrs) => invoke('remove_game_ips', { addrs }),
     getExtraStrategies: () => invoke('get_extra_strategies'),
     generateExtraStrategies: (template) => invoke('generate_extra_strategies', { template: template || null }),
     removeExtraStrategies: () => invoke('remove_extra_strategies'),

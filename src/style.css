@@ -1400,6 +1400,106 @@ html[data-theme="dark"] .menu { box-shadow: 0 16px 40px -12px rgba(0,0,0,.7); }
 }
 .addr-remove-btn:hover { background: var(--red-bg); color: var(--red); border-color: var(--red-line); }
 
+/* ─────────── Игры: состояния сбора и группы адресов ───────────
+   Карточке нужен был отступ: .card-body в стилях не был определён вовсе,
+   поэтому абзацы на странице лепились к краям и шли одним весом с
+   заголовками. */
+.card-body { padding: 14px 20px 16px; }
+
+.game-empty {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: 8px; padding: 34px 24px 32px;
+}
+.game-empty-icon {
+  width: 44px; height: 44px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--subtle);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--tx-5);
+}
+.game-empty-title { font-size: 15px; font-weight: 700; color: var(--tx); padding-top: 6px; }
+.game-empty-text { margin: 0; font-size: 13.5px; color: var(--tx-4); line-height: 1.6; max-width: 460px; }
+.game-empty-text.dim { color: var(--tx-5); }
+
+.game-scanning { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px 20px; }
+.game-live { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.game-live-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--green); flex: 0 0 auto;
+  animation: game-pulse 2.4s ease-in-out infinite;
+}
+@keyframes game-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--halo-a), .35); }
+  60% { box-shadow: 0 0 0 5px rgba(var(--halo-a), 0); }
+}
+.game-live-label {
+  font-size: 13px; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--green); white-space: nowrap;
+}
+.game-live-proc {
+  font-family: 'Cascadia Mono', Consolas, monospace; font-size: 13.5px;
+  color: var(--tx-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.game-count { display: flex; align-items: baseline; gap: 7px; }
+.game-count-n {
+  font-size: 22px; font-weight: 700; letter-spacing: -.02em;
+  color: var(--tx); font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.game-count-w { font-size: 13px; color: var(--tx-5); }
+.game-progress { display: flex; align-items: center; gap: 12px; }
+.game-progress-bar { flex: 1; height: 4px; border-radius: 999px; background: var(--nav-active); overflow: hidden; }
+.game-progress-fill { height: 100%; width: 0; background: var(--green); transition: width .4s linear; }
+.game-progress-t { font-size: 13px; color: var(--tx-5); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.game-note { margin: 0; font-size: 14px; color: var(--tx-4); line-height: 1.6; }
+
+.game-group {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 20px; background: var(--subtle); cursor: pointer;
+  border-top: 1px solid var(--line-row);
+}
+.game-group:hover { background: var(--pill); }
+.game-group-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.game-group-chev { flex: 0 0 auto; color: var(--tx-6); transform: rotate(-90deg); transition: transform .12s; }
+.game-group.open .game-group-chev { transform: rotate(0deg); }
+.game-group-name { font-size: 14.5px; font-weight: 600; color: var(--tx); white-space: nowrap; }
+.game-asn {
+  font-size: 11.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+  border-radius: 20px; padding: 3px 8px;
+  color: var(--tx-3); background: var(--nav-active); white-space: nowrap;
+}
+.game-group-meta { font-size: 13.5px; color: var(--tx-5); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.game-group-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.game-when { font-size: 13.5px; color: var(--tx-5); white-space: nowrap; }
+
+.game-net {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 6px 20px 6px 46px; border-top: 1px solid var(--line-row);
+}
+.game-net-addr { font-family: 'Cascadia Mono', Consolas, monospace; font-size: 13.5px; color: var(--tx-2); }
+.game-more {
+  display: flex; align-items: center; width: 100%; text-align: left;
+  padding: 10px 20px 12px 46px; border: 0; border-top: 1px solid var(--line-row);
+  background: none; font-family: inherit; font-size: 13.5px; font-weight: 600;
+  color: var(--green); cursor: pointer;
+}
+
+.game-skip { display: flex; align-items: center; gap: 10px; padding: 11px 20px; border-top: 1px solid var(--line-row); background: var(--subtle); }
+.game-skip-text { font-size: 13.5px; color: var(--tx-4); line-height: 1.5; }
+.game-skip-addr {
+  font-family: 'Cascadia Mono', Consolas, monospace; font-size: 12.5px;
+  color: var(--tx-3); background: var(--line-row); border-radius: 6px; padding: 2px 6px;
+}
+.game-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 12px 20px; border-top: 1px solid var(--line-row); background: var(--subtle);
+}
+.game-foot-text { font-size: 13.5px; color: var(--tx-4); line-height: 1.5; }
+.game-foot-btns { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.btn-link { padding: 6px; font-size: 13.5px; color: var(--tx-4); background: none; border: 0; cursor: pointer; font-family: inherit; }
+.btn-link:hover { color: var(--tx); }
+.game-msg { padding: 12px 20px; border-top: 1px solid var(--line-row); font-size: 13.5px; color: var(--tx-4); line-height: 1.6; }
+.game-filter-body { padding: 14px 20px 16px; font-size: 14px; color: var(--tx-4); line-height: 1.6; }
+
 /* Строка «добавить адрес» — открывает командную палитру */
 .cmd-row {
   display: flex;

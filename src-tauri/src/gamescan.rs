@@ -488,12 +488,43 @@ pub fn parse_prefixes(json: &str) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operator {
     /// Сети оператора: их и кладём.
-    Nets(Vec<String>),
+    Nets { asn: String, nets: Vec<String> },
     /// Оператор известен, но за его адресами стоит пол-интернета. Такой
     /// адрес не берём совсем — ни сетями, ни /24.
     Cloud { asn: String, prefixes: usize },
     /// Выяснить не вышло: справочник недоступен, ответ пуст или испорчен.
     Unknown,
+}
+
+/// Имя оператора из ответа справочника.
+///
+/// Справочник отдаёт его вместе с кодом реестра: «RIOT-NA1 - Riot Games,
+/// Inc». Человеку нужна вторая половина — код реестра ему ничего не
+/// говорит. Разделителя может и не быть, тогда берём как есть.
+pub fn parse_holder(json: &str) -> Option<String> {
+    let at = json.find("\"holder\"")?;
+    let rest = &json[at + 8..];
+    let start = rest.find('"')?;
+    let rest = &rest[start + 1..];
+    let end = rest.find('"')?;
+    let whole = rest[..end].trim();
+    if whole.is_empty() {
+        return None;
+    }
+    Some(match whole.split_once(" - ") {
+        Some((_, name)) if !name.trim().is_empty() => name.trim().to_string(),
+        _ => whole.to_string(),
+    })
+}
+
+/// Как зовут оператора. Пусто — справочник промолчал, обойдёмся номером.
+fn holder_of(asn: &str) -> String {
+    crate::maintenance::http_get(&format!(
+        "https://stat.ripe.net/data/as-overview/data.json?resource=AS{asn}"
+    ))
+    .ok()
+    .and_then(|j| parse_holder(&j))
+    .unwrap_or_default()
 }
 
 /// Решение по числу объявленных сетей. Вынесено отдельно, чтобы
@@ -505,7 +536,7 @@ fn decide(asn: &str, pfx: Vec<String>) -> Operator {
     if !should_expand(pfx.len()) {
         return Operator::Cloud { asn: asn.to_string(), prefixes: pfx.len() };
     }
-    Operator::Nets(pfx)
+    Operator::Nets { asn: asn.to_string(), nets: pfx }
 }
 
 /// Спрашивает справочник, чей адрес.
@@ -604,19 +635,25 @@ pub fn remove_from(
     let Ok(existing) = std::fs::read_to_string(&list) else {
         return Ok(0);
     };
-    let mine = extract_block(&existing);
-    let rest: Vec<String> = mine.iter().filter(|a| !addrs.contains(a)).cloned().collect();
-    let убрано = mine.len() - rest.len();
+    let (mut groups, skipped) = parse_groups(&existing);
+    let было: usize = groups.iter().map(|g| g.nets.len()).sum();
+    for g in groups.iter_mut() {
+        g.nets.retain(|n| !addrs.contains(n));
+    }
+    // Опустевшая группа уходит вместе со своей строкой: оператор без сетей
+    // человеку ни о чём не говорит.
+    groups.retain(|g| !g.nets.is_empty());
+    let убрано = было - groups.iter().map(|g| g.nets.len()).sum::<usize>();
     if убрано == 0 {
         return Ok(0);
     }
     // Пустой `ipset-all.txt` значит «применяться ко всему», поэтому там на
     // месте пустоты обязана остаться заглушка. Пустой список исключений
     // значит «ничего не исключать» — заглушка в нём только путала бы.
-    let text = if rest.is_empty() && target == Target::Skip {
+    let text = if groups.is_empty() && skipped.is_empty() && target == Target::Skip {
         without_block(&existing)
     } else {
-        merge_block(&existing, &rest)
+        merge_groups(&existing, &groups, &skipped)
     };
     std::fs::write(&list, text).map_err(|e| e.to_string())?;
     Ok(убрано)
@@ -633,6 +670,32 @@ pub fn changed_at(root: &std::path::Path, target: Target) -> Option<u64> {
     Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
+/// Добавляет группу к уже собранным.
+///
+/// Сеть, которая где-то уже лежит, второй раз не кладётся, а группа того же
+/// оператора пополняется, а не заводится заново: иначе после трёх сборов
+/// подряд Riot был бы тремя одинаковыми группами.
+fn добавить_группу(groups: &mut Vec<Group>, asn: String, name: String, at: u64, nets: Vec<String>) {
+    let занято: BTreeSet<String> = groups.iter().flat_map(|g| g.nets.iter().cloned()).collect();
+    let mut свежие: Vec<String> = nets.into_iter().filter(|n| !занято.contains(n)).collect();
+    свежие.sort();
+    свежие.dedup();
+    if свежие.is_empty() {
+        return;
+    }
+    if let Some(g) = groups.iter_mut().find(|g| !g.asn.is_empty() && g.asn == asn) {
+        g.nets.extend(свежие);
+        g.nets.sort();
+        g.nets.dedup();
+        g.at = at;
+        if g.name.is_empty() {
+            g.name = name;
+        }
+        return;
+    }
+    groups.push(Group { asn, name, at, nets: свежие });
+}
+
 /// Кладёт собранные адреса в список релиза, не тронув чужие строки.
 ///
 /// Возвращает то, что в список НЕ пошло, готовыми к показу строками.
@@ -647,34 +710,51 @@ pub fn save_ips_to(
     let existing = std::fs::read_to_string(&list).unwrap_or_default();
     // К уже собранному добавляем, а не заменяем: сканов бывает несколько —
     // отдельно меню, отдельно матч, отдельно голосовой чат.
-    let mut all: BTreeSet<String> = extract_block(&existing).into_iter().collect();
-    let mut skipped = Vec::new();
+    let (mut groups, mut skipped) = parse_groups(&existing);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // Только пропущенное ЭТОГО сбора: старое человек уже видел, и
+    // повторять его в итоге очередного скана незачем.
+    let mut свежие_пропуски = Vec::new();
     for a in addrs {
         // Готовую сеть спрашивать не о чем: так приходит перенос из списка в
         // список, где адреса уже развёрнуты. Без этой проверки «Не трогать»
         // ходило в справочник по разу на каждую из 37 сетей — впустую.
         if a.contains('/') {
-            all.insert(a.clone());
+            добавить_группу(&mut groups, String::new(), String::new(), now, vec![a.clone()]);
             continue;
         }
         // Сети оператора, если удалось выяснить; иначе /24 вокруг адреса.
         // Один адрес одного оператора спрашиваем один раз: у пойманных
         // адресов оператор обычно общий.
         match operator_of(a) {
-            Operator::Nets(pfx) => all.extend(pfx),
+            Operator::Nets { asn, nets } => {
+                let name = holder_of(&asn);
+                добавить_группу(&mut groups, asn, name, now, nets);
+            }
             // Облако не берём ни в каком виде: его /24 — это чужой трафик,
             // который обход начнёт ломать, а к игре он отношения не имеет.
             Operator::Cloud { asn, prefixes } => {
-                skipped.push(format!("{a} — облако AS{asn}, у него {prefixes} сетей"));
+                if skipped.iter().any(|s| s.addr == *a) {
+                    continue;
+                }
+                let name = holder_of(&asn);
+                let человеку = format!(
+                    "{a} — облако {}, у него {prefixes} сетей",
+                    if name.is_empty() { format!("AS{asn}") } else { name.clone() }
+                );
+                skipped.push(Skipped { addr: a.clone(), asn, name, prefixes });
+                свежие_пропуски.push(человеку);
             }
             Operator::Unknown => {
-                all.insert(to_subnet(a));
+                добавить_группу(&mut groups, String::new(), String::new(), now, vec![to_subnet(a)]);
             }
         }
     }
-    let all: Vec<String> = all.into_iter().collect();
-    let merged = merge_block(&existing, &all);
-    std::fs::write(&list, merged).map_err(|e| e.to_string())?;
+    let all: Vec<String> = groups.iter().flat_map(|g| g.nets.iter().cloned()).collect();
+    std::fs::write(&list, merge_groups(&existing, &groups, &skipped)).map_err(|e| e.to_string())?;
     // Один адрес не может значить «обходить» и «не трогать» одновременно.
     // Оба файла уходят в winws в ОДНУ группу аргументов: рядом с
     // `--ipset=ipset-all.txt` всегда стоит `--ipset-exclude=ipset-exclude-user.txt`,
@@ -684,7 +764,7 @@ pub fn save_ips_to(
     // адреса» все 37 сетей Riot лежали в обоих файлах разом. Интерфейс
     // показывал «37 адресов», а игровой профиль не применялся к ним вовсе.
     remove_from(root, target.opposite(), &all)?;
-    Ok(skipped)
+    Ok(свежие_пропуски)
 }
 
 /// Совместимость с прежними вызовами: по умолчанию — в обход.
@@ -897,6 +977,141 @@ fn стоит_собирать(proto: Proto, port: u16) -> bool {
 
 pub const BLOCK_START: &str = "# ─── klutz: адреса игр, собрано сканированием ───";
 pub const BLOCK_END: &str = "# ─── klutz: конец блока ───";
+
+// ─────────── группы внутри блока ───────────
+//
+// Список для winws — это просто строки сетей. Но человеку нужно знать, чьи
+// они и когда пойманы, иначе список из тридцати семи строк ничем не
+// отличается от случайного набора, и решить, что из него убрать, нельзя.
+//
+// Храним это строками-комментариями прямо в блоке: winws их не видит
+// (`extract_block` пропускает всё, что начинается с #), а мы собираем из
+// них группы. Отдельный файл рядом рассыпался бы при первой же ручной
+// правке списка.
+
+const GROUP_TAG: &str = "# klutz-группа ";
+const SKIP_TAG: &str = "# klutz-пропущено ";
+
+/// Сети одного оператора, пойманные одним сбором.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct Group {
+    /// Номер оператора без «AS». Пусто — оператор неизвестен.
+    pub asn: String,
+    /// Имя оператора. Пусто — справочник промолчал.
+    pub name: String,
+    /// Когда собрана, миллисекунды эпохи. 0 — неизвестно.
+    pub at: u64,
+    pub nets: Vec<String>,
+}
+
+/// Адрес, который в список не пошёл.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Skipped {
+    pub addr: String,
+    pub asn: String,
+    pub name: String,
+    pub prefixes: usize,
+}
+
+/// Разбирает блок на группы и пропущенное.
+///
+/// Сети без своей группы не теряются: они попадают в безымянную группу.
+/// Так переживают и старые файлы, где групп ещё не было, и ручную правку.
+pub fn parse_groups(text: &str) -> (Vec<Group>, Vec<Skipped>) {
+    let mut groups: Vec<Group> = Vec::new();
+    let mut skipped = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t == BLOCK_START {
+            inside = true;
+            continue;
+        }
+        if t == BLOCK_END {
+            inside = false;
+            continue;
+        }
+        if !inside || t.is_empty() {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix(GROUP_TAG) {
+            // AS<номер> <время> <имя через пробелы>
+            let mut it = rest.splitn(3, ' ');
+            let asn = it.next().unwrap_or("").trim_start_matches("AS").to_string();
+            let at = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let name = it.next().unwrap_or("").trim().to_string();
+            groups.push(Group { asn, name, at, nets: Vec::new() });
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix(SKIP_TAG) {
+            // <адрес> AS<номер> <сколько сетей> <имя>
+            let mut it = rest.splitn(4, ' ');
+            let addr = it.next().unwrap_or("").to_string();
+            let asn = it.next().unwrap_or("").trim_start_matches("AS").to_string();
+            let prefixes = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let name = it.next().unwrap_or("").trim().to_string();
+            if !addr.is_empty() {
+                skipped.push(Skipped { addr, asn, name, prefixes });
+            }
+            continue;
+        }
+        if t.starts_with('#') {
+            continue;
+        }
+        match groups.last_mut() {
+            Some(g) => g.nets.push(t.to_string()),
+            None => groups.push(Group { nets: vec![t.to_string()], ..Default::default() }),
+        }
+    }
+    groups.retain(|g| !g.nets.is_empty());
+    (groups, skipped)
+}
+
+/// Собирает файл заново из групп. Чужие строки остаются как были.
+pub fn merge_groups(existing: &str, groups: &[Group], skipped: &[Skipped]) -> String {
+    let сетей_нет = groups.iter().all(|g| g.nets.is_empty());
+    if сетей_нет && skipped.is_empty() {
+        // Тот же путь, что и у пустого набора: вернуть заглушку, а не
+        // пустой файл, иначе профиль начнёт применяться ко всему подряд.
+        return merge_block(existing, &[]);
+    }
+    let base: Vec<String> = without_block(existing)
+        .lines()
+        .filter(|l| !l.trim().starts_with("203.0.113.113"))
+        .map(|l| l.to_string())
+        .collect();
+    let mut out = base.join("\r\n").trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\r\n");
+    }
+    out.push_str(BLOCK_START);
+    out.push_str("\r\n");
+    if сетей_нет {
+        // Сетей не осталось, а пропущенное есть. Без этой строки в файле
+        // были бы одни комментарии — для winws это пустой список, то есть
+        // «без ограничения по адресу»: обход полез бы в каждый матч.
+        out.push_str(EMPTY_STUB);
+        out.push_str("\r\n");
+    }
+    for g in groups.iter().filter(|g| !g.nets.is_empty()) {
+        out.push_str(&format!("{GROUP_TAG}AS{} {} {}", g.asn, g.at, g.name));
+        out.push_str("\r\n");
+        for n in &g.nets {
+            out.push_str(n);
+            out.push_str("\r\n");
+        }
+    }
+    for s in skipped {
+        out.push_str(&format!(
+            "{SKIP_TAG}{} AS{} {} {}",
+            s.addr, s.asn, s.prefixes, s.name
+        ));
+        out.push_str("\r\n");
+    }
+    out.push_str(BLOCK_END);
+    out.push_str("\r\n");
+    out
+}
 
 /// Адреса из нашего блока. Пусто — блока нет.
 pub fn extract_block(text: &str) -> Vec<String> {
@@ -1343,7 +1558,7 @@ mod unit_tests {
     fn живой_оператор_по_адресу() {
         // Пойманные на этой машине адреса Riot и Valve.
         for ip in ["185.40.64.5", "162.249.72.10", "146.66.155.73"] {
-            let Operator::Nets(pfx) = operator_of(ip) else {
+            let Operator::Nets { nets: pfx, .. } = operator_of(ip) else {
                 panic!("{ip}: оператор не определился");
             };
             println!("{ip}: {} сетей", pfx.len());
@@ -1354,6 +1569,71 @@ mod unit_tests {
         let cf = operator_of("104.29.153.1");
         println!("Cloudflare: {cf:?}");
         assert!(matches!(cf, Operator::Cloud { .. }), "облако должно опознаваться");
+    }
+
+    #[test]
+    fn группы_переживают_запись_и_чтение() {
+        // Список для winws — просто строки сетей, а человеку нужно знать,
+        // чьи они и когда пойманы. Держим это комментариями внутри блока:
+        // winws их не видит, а мы собираем из них группы.
+        let groups = vec![
+            Group {
+                asn: "6507".into(),
+                name: "Riot Games, Inc".into(),
+                at: 1_757_712_345_000,
+                nets: vec!["162.249.72.0/21".into(), "185.40.64.0/22".into()],
+            },
+            Group { asn: String::new(), name: String::new(), at: 0, nets: vec!["1.2.3.0/24".into()] },
+        ];
+        let skipped = vec![Skipped {
+            addr: "104.29.153.1".into(),
+            asn: "13335".into(),
+            name: "Cloudflare, Inc.".into(),
+            prefixes: 2395,
+        }];
+
+        let текст = merge_groups("чужая строка", &groups, &skipped);
+        assert!(текст.starts_with("чужая строка"), "чужое сохраняется: {текст:?}");
+        // winws читает только сети: комментарии он пропускает, как и мы.
+        assert_eq!(
+            extract_block(&текст),
+            vec!["162.249.72.0/21", "185.40.64.0/22", "1.2.3.0/24"]
+        );
+
+        let (назад, пропуск) = parse_groups(&текст);
+        assert_eq!(назад, groups, "группы вернулись как были");
+        assert_eq!(пропуск, skipped, "пропущенное вернулось как было");
+    }
+
+    #[test]
+    fn без_сетей_но_с_пропущенным_заглушка_остаётся() {
+        // Иначе в файле оказались бы одни комментарии, а пустой ipset у
+        // winws значит «без ограничения по адресу» — обход полез бы в
+        // каждый матч.
+        let skipped = vec![Skipped {
+            addr: "104.29.153.1".into(),
+            asn: "13335".into(),
+            name: "Cloudflare, Inc.".into(),
+            prefixes: 2395,
+        }];
+        let текст = merge_groups("", &[], &skipped);
+        assert_eq!(extract_block(&текст), vec![EMPTY_STUB], "{текст:?}");
+        assert_eq!(parse_groups(&текст).1, skipped, "пропущенное на месте");
+    }
+
+    #[test]
+    fn имя_оператора_без_кода_реестра() {
+        // Справочник отдаёт «RIOT-NA1 - Riot Games, Inc». Код реестра
+        // человеку ничего не говорит — показываем вторую половину.
+        let j = r#"{"data":{"holder":"RIOT-NA1 - Riot Games, Inc"}}"#;
+        assert_eq!(parse_holder(j).as_deref(), Some("Riot Games, Inc"));
+        let c = r#"{"data":{"holder":"CLOUDFLARENET - Cloudflare, Inc."}}"#;
+        assert_eq!(parse_holder(c).as_deref(), Some("Cloudflare, Inc."));
+        // Разделителя может не быть — тогда как есть.
+        let o = r#"{"data":{"holder":"SOMEISP"}}"#;
+        assert_eq!(parse_holder(o).as_deref(), Some("SOMEISP"));
+        assert_eq!(parse_holder("{}"), None);
+        assert_eq!(parse_holder(r#"{"holder":""}"#), None);
     }
 
     #[test]
@@ -1431,7 +1711,7 @@ mod unit_tests {
         // так 104.29.153.0/24 (Cloudflare) уезжала под десинхронизацию,
         // возвращаясь после каждой ручной чистки.
         let сети: Vec<String> = (0..36).map(|i| format!("10.{i}.0.0/24")).collect();
-        assert!(matches!(decide("6507", сети), Operator::Nets(_)), "Riot берём");
+        assert!(matches!(decide("6507", сети), Operator::Nets { .. }), "Riot берём");
 
         let облако: Vec<String> = (0..2395).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)).collect();
         match decide("13335", облако) {
