@@ -488,10 +488,13 @@ html[data-theme="dark"] .about-head img.logo-dark { display: block; }
 .nav-item .knob-fill { fill: var(--sidebar); }
 .nav-item:hover { background: var(--pill); color: var(--tx); }
 .nav-item.active { background: var(--nav-active); color: var(--tx); font-weight: 600; }
-/* Меняется только цвет заливки. Раньше активному пункту добавлялся ещё и
-   stroke: обводки у этих иконок нет, она пририсовывалась поверх заливки и
-   утолщала каждый контур — выглядело так, будто иконка растёт при переходе. */
-.nav-item.active svg { fill: var(--green); }
+/* Через color, а не fill: у иконок собственный `fill="currentColor"` на
+   каждом контуре, и заливка, заданная корню <svg>, до них не доходит —
+   свой атрибут контура сильнее наследования. Красим то, на что они
+   действительно смотрят.
+   Обводку здесь ставить нельзя: её у этих иконок нет, и добавленный stroke
+   утолщал каждый контур — выглядело так, будто иконка растёт при переходе. */
+.nav-item.active svg { color: var(--green); }
 
 .sb-spacer { flex: 1; }
 
