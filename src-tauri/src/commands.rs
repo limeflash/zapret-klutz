@@ -381,6 +381,9 @@ pub fn run_tests(app: AppHandle, state: State<AppState>, mode: String) -> RunTes
     if let Some(r) = &chance.response {
         let _ = app.emit("test-log", format!("Предпроверка: {}", r.reason));
     }
+    if let Some(v) = &chance.volume {
+        let _ = app.emit("test-log", format!("Предпроверка: {}", v.note));
+    }
 
     let before = state.persisted.lock().unwrap().active_config.clone();
     let result = run_tests_inner(&app, &run, &root, &mode);
@@ -1416,6 +1419,10 @@ pub struct BypassChance {
     /// Не нацелена ли блокировка именно на TLS 1.3.
     #[serde(skip_serializing_if = "Option::is_none")]
     tls13: Option<String>,
+    /// Доезжает ли ответ целиком. Заполняется, только когда есть что
+    /// сказать: «перелезли через потолок» — не новость.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    volume: Option<crate::probe::VolumeResult>,
 }
 
 /// Отвечает за пару секунд на вопрос, ради которого иначе пришлось бы гнать
@@ -1463,8 +1470,15 @@ fn bypass_chance(state: &State<AppState>) -> BypassChance {
         targets.push(ChanceTarget { name: t.name, host: t.host, verdict: r.verdict, note: r.note });
     }
 
-    let (mut response, mut tls13) = (None, None);
+    let (mut response, mut tls13, mut volume) = (None, None, None);
     if let Some((ip, port, host)) = deep {
+        // Скачиваем ответ целиком: рукопожатие могло пройти безупречно, а
+        // поток умереть на втором десятке килобайт. Все остальные пробы
+        // этого не видят — они кончаются на рукопожатии.
+        let v = crate::probe::http_probe_volume(&host, port, Some(&ip.to_string()), timeout.as_secs().max(10));
+        if v.verdict != crate::probe::VolumeVerdict::Clear {
+            volume = Some(v);
+        }
         // Про ответное направление говорить осмысленно только там, где
         // запрос проходит: если режут запрос, до ответа дело не доходит.
         let (v13, why13) = crate::tlsprobe::probe_tls13_block(ip, port, &host, timeout);
@@ -1479,7 +1493,7 @@ fn bypass_chance(state: &State<AppState>) -> BypassChance {
 
     let (verdict, note) =
         crate::tlsprobe::aggregate(&targets.iter().map(|t| t.verdict).collect::<Vec<_>>());
-    BypassChance { verdict, note, targets, response, tls13 }
+    BypassChance { verdict, note, targets, response, tls13, volume }
 }
 
 #[tauri::command(async)]

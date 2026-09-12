@@ -38,6 +38,9 @@ pub enum FailureCode {
     /// HTTP 451 — «недоступно по юридическим причинам». Типизированный
     /// блок: путь для клиента непригоден, но и стратегия его не чинит.
     HttpBlocked,
+    /// Сервер ответил, передача пошла — и оборвалась. Рукопожатие тут ни
+    /// при чём: режут уже установленный поток.
+    Cutoff,
     Unknown,
 }
 
@@ -62,7 +65,10 @@ impl FailureCode {
     /// Нужен ли контрольный замер. Лишнее рукопожатие платим только там,
     /// где оно что-то решает: имя ушло на провод, а ответа не было.
     pub fn needs_control(self) -> bool {
-        self != FailureCode::Ok && self.reached_tls() && !self.server_reachable()
+        self != FailureCode::Ok
+            && self != FailureCode::Cutoff
+            && self.reached_tls()
+            && !self.server_reachable()
     }
 
     /// Короткое имя для интерфейса и логов.
@@ -76,6 +82,7 @@ impl FailureCode {
             FailureCode::TlsCert => "tls_cert",
             FailureCode::EmptyReply => "empty_reply",
             FailureCode::HttpBlocked => "http_451",
+            FailureCode::Cutoff => "cutoff",
             FailureCode::Unknown => "unknown",
         }
     }
@@ -102,6 +109,9 @@ pub enum PathVerdict {
     Ip,
     /// Ответил сам сервер. Его политика, а не цензура.
     Server,
+    /// Соединение поднялось и отдавало данные, а потом его оборвали. Про
+    /// имя это ничего не говорит: имя уже проехало.
+    Cutoff,
 }
 
 /// Решает, где блокируют, по результату основной пробы и контрольной.
@@ -128,6 +138,14 @@ pub fn classify_path(
         return (
             PathVerdict::Server,
             "ответил сам сервер — это его политика, а не блокировка".into(),
+        );
+    }
+    if code == FailureCode::Cutoff {
+        return (
+            PathVerdict::Cutoff,
+            "сервер ответил, а поток оборвали на середине — режут не имя, \
+             а уже установленное соединение"
+                .into(),
         );
     }
     if code == FailureCode::HttpBlocked {
@@ -208,6 +226,17 @@ pub fn code_is_answer(code: u16) -> bool {
 /// Коды выхода curl — стабильная и документированная таблица, так что
 /// раскладывать их по стадиям надёжнее, чем разбирать текст ошибки.
 fn code_from_curl(exit: i32, status: Option<u16>) -> (bool, FailureCode) {
+    // Ненулевой выход при УЖЕ разобранном коде ответа — это не «не дошли».
+    // Сервер ответил, а оборвалось то, что шло после: ровно подпись отсечки
+    // потока. Раньше такой случай раскладывался по стадии обрыва (35/56 →
+    // «рукопожатие не состоялось»), и разговор уходил на имя, которое к делу
+    // уже не относится.
+    if exit != 0 {
+        if let Some(st) = status.filter(|s| code_is_answer(*s)) {
+            let _ = st;
+            return (false, FailureCode::Cutoff);
+        }
+    }
     match exit {
         0 => match status {
             // 451 — «недоступно по юридическим причинам». Единственный
@@ -289,6 +318,132 @@ pub fn http_probe_pinned(host: &str, port: u16, pin_ip: Option<&str>, timeout_se
             code: FailureCode::Unknown,
         },
     }
+}
+
+/// Сколько байт надо получить, чтобы говорить, что поток пережил окно
+/// отсечки. Полоса, в которой обрывают, по замерам соседей — 14–34 КБ;
+/// 64 КБ заведомо за ней, и меньше брать нельзя: «скачалось 20 КБ целиком»
+/// ничего не доказывает, через потолок надо реально перелезть.
+pub const VOLUME_FLOOR: u64 = 64 * 1024;
+
+/// Что стало с потоком после того, как сервер ответил.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeVerdict {
+    /// Мерить нечего: сервер не ответил вовсе — это вопрос к рукопожатию.
+    NotApplicable,
+    /// Перелезли через потолок — отсечки по объёму здесь нет.
+    Clear,
+    /// Поток оборвали, не дойдя до потолка.
+    Cutoff,
+    /// Ответ пришёл целиком, но он меньше потолка: доказательства нет.
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VolumeResult {
+    pub verdict: VolumeVerdict,
+    pub note: String,
+    /// Сколько байт тела получили.
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+/// Чистое правило. `complete` — завершилась ли передача штатно.
+pub fn classify_volume(status: Option<u16>, bytes: u64, complete: bool) -> (VolumeVerdict, String) {
+    let Some(st) = status.filter(|s| code_is_answer(*s)) else {
+        return (
+            VolumeVerdict::NotApplicable,
+            "сервер не ответил — про объём говорить рано, дело в рукопожатии".into(),
+        );
+    };
+    let _ = st;
+    if bytes >= VOLUME_FLOOR {
+        return (
+            VolumeVerdict::Clear,
+            format!("получено {} КБ — поток пережил окно, в котором обрывают", bytes / 1024),
+        );
+    }
+    if complete {
+        return (
+            VolumeVerdict::Unknown,
+            format!(
+                "ответ пришёл целиком, но в нём всего {} КБ — через потолок в {} КБ \
+                 перелезть не вышло, и отсечку это не проверяет",
+                bytes / 1024,
+                VOLUME_FLOOR / 1024
+            ),
+        );
+    }
+    (
+        VolumeVerdict::Cutoff,
+        format!(
+            "сервер ответил, отдал {} КБ и замолчал. Рукопожатие прошло, режут уже \
+             установленный поток — сменой стратегии это обычно не лечится, нужен \
+             другой маршрут или туннель",
+            bytes / 1024
+        ),
+    )
+}
+
+/// Скачивает ответ целиком и смотрит, доехал ли он.
+///
+/// Зачем отдельно от основной пробы: та ходит методом HEAD и тела не
+/// получает вовсе. Есть класс блокировок, где рукопожатие проходит
+/// безупречно, первые килобайты идут, а поток умирает на втором десятке —
+/// человек видит «ютуб открывается и не грузится», а проба показывает
+/// зелёное. Дорого, поэтому зовём не в мониторинге, а перед прогоном.
+pub fn http_probe_volume(
+    host: &str,
+    port: u16,
+    pin_ip: Option<&str>,
+    timeout_sec: u64,
+) -> VolumeResult {
+    let scheme = if port == 443 { "https" } else { "http" };
+    let url = if port == 443 || port == 80 {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}:{port}")
+    };
+
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
+    cmd.args([
+        "-s",
+        "-o",
+        "NUL",
+        "-w",
+        "%{http_code} %{size_download}",
+        "-m",
+        &timeout_sec.to_string(),
+        // Браузерный User-Agent: часть целей отдаёт обрезанную заглушку в
+        // ответ на пустой, и мерили бы мы её, а не настоящую страницу.
+        "-H",
+        "User-Agent: Mozilla/5.0",
+    ]);
+    if let Some(ip) = pin_ip {
+        cmd.args(["--resolve", &format!("{host}:{port}:{ip}")]);
+    }
+    cmd.arg(&url);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let Ok(out) = cmd.output() else {
+        return VolumeResult {
+            verdict: VolumeVerdict::NotApplicable,
+            note: "не удалось запустить curl".into(),
+            bytes: 0,
+            status: None,
+        };
+    };
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut parts = raw.split_whitespace();
+    let status = parts.next().and_then(|v| v.parse::<u16>().ok()).filter(|s| *s >= 100);
+    let bytes = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let complete = out.status.success();
+    let (verdict, note) = classify_volume(status, bytes, complete);
+    VolumeResult { verdict, note, bytes, status }
 }
 
 /// Первый адрес, в который разрешается имя. Контрольный замер обязан идти в
@@ -420,6 +575,74 @@ mod unit_tests {
         assert_eq!(code_from_curl(35, None), (false, FailureCode::TlsFailed));
         assert_eq!(code_from_curl(56, None), (false, FailureCode::TlsFailed));
         assert_eq!(code_from_curl(60, None), (false, FailureCode::TlsCert));
+    }
+
+    #[test]
+    fn отсечка_потока_это_не_провал_рукопожатия() {
+        // Сервер ответил 200, а потом передачу оборвали (curl 18 —
+        // «передана часть файла», 56 — обрыв при приёме). Раньше это
+        // раскладывалось по стадии обрыва и уходило в разговор про имя,
+        // которое к тому моменту давно проехало.
+        for exit in [18, 56, 92] {
+            assert_eq!(code_from_curl(exit, Some(200)), (false, FailureCode::Cutoff), "{exit}");
+        }
+        // Без разобранного кода ответа всё по-прежнему: это стадия обрыва.
+        assert_eq!(code_from_curl(56, None), (false, FailureCode::TlsFailed));
+        assert_eq!(code_from_curl(28, Some(0)), (false, FailureCode::Timeout));
+    }
+
+    #[test]
+    fn отсечка_не_спрашивает_контроль_и_не_путается_с_именем() {
+        // Контроль нейтральным именем тут бесполезен: имя уже проехало.
+        assert!(!FailureCode::Cutoff.needs_control());
+        let (v, why) = classify_path(false, FailureCode::Cutoff, None);
+        assert_eq!(v, PathVerdict::Cutoff);
+        assert!(why.contains("установленное соединение"), "{why}");
+    }
+
+    /// Живая проверка самой функции, а не правила: строится ли командная
+    /// строка, разбирается ли «код пробел байты». Сети в CI нет, поэтому
+    /// вручную: `cargo test -- --ignored живой_объём --nocapture`.
+    #[test]
+    #[ignore]
+    fn живой_объём_на_настоящих_целях() {
+        for host in ["www.youtube.com", "discord.com", "cdn.discordapp.com"] {
+            let r = http_probe_volume(host, 443, None, 20);
+            println!("{host}: {:?} {} байт, статус {:?}", r.verdict, r.bytes, r.status);
+            assert!(r.status.is_some(), "{host}: код ответа не разобран");
+        }
+    }
+
+    #[test]
+    fn объём_перелезли_через_потолок() {
+        let (v, why) = classify_volume(Some(200), VOLUME_FLOOR, true);
+        assert_eq!(v, VolumeVerdict::Clear, "{why}");
+    }
+
+    #[test]
+    fn объём_маленькая_страница_ничего_не_доказывает() {
+        // Целиком скачанные 20 КБ не проверяют потолок в 64 КБ.
+        let (v, why) = classify_volume(Some(200), 20 * 1024, true);
+        assert_eq!(v, VolumeVerdict::Unknown, "{why}");
+        assert!(why.contains("перелезть"), "{why}");
+    }
+
+    #[test]
+    fn объём_оборвали_на_середине() {
+        // Ровно подпись класса: ответ есть, до потолка не дошли, поток умер.
+        let (v, why) = classify_volume(Some(200), 18 * 1024, false);
+        assert_eq!(v, VolumeVerdict::Cutoff, "{why}");
+        // И обрыв сразу после заголовков — тоже отсечка, а не «нет связи».
+        assert_eq!(classify_volume(Some(200), 0, false).0, VolumeVerdict::Cutoff);
+    }
+
+    #[test]
+    fn объём_без_ответа_не_измеряется() {
+        for st in [None, Some(451)] {
+            let (v, why) = classify_volume(st, 0, false);
+            assert_eq!(v, VolumeVerdict::NotApplicable, "{st:?}");
+            assert!(why.contains("рукопожатии"), "{why}");
+        }
     }
 
     #[test]
