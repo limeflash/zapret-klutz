@@ -152,8 +152,8 @@
       response: { verdict: 'blocked', reason: 'запрос проходит, а рукопожатие не завершается ни разу — режут ОТВЕТ', target: 0, control: 2, repeats: 2 },
     }),
     getGameScan: async () => ({
-      saved: 3,
-      addrs: ['104.16.0.1', '155.133.226.76', '162.159.135.232'],
+      saved: 2,
+      addrs: ['146.66.155.0/24', '155.133.226.0/24'],
       gameFilter: 'tcp',
     }),
     gameCandidates: async () => [
@@ -171,7 +171,7 @@
     }),
     scanGameFromLog: async () => ({
       running: true,
-      addrs: ['104.16.0.1', '155.133.226.76', '162.159.135.232', '146.66.155.84'],
+      addrs: ['146.66.155.0/24', '155.133.226.0/24'],
       tcpPorts: [],
       udpPorts: [],
       ticks: 30,
