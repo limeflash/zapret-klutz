@@ -141,10 +141,11 @@
 <section id="dropZone" class="dropzone">
   <div class="dropzone-inner">
     <button id="cancelChangeReleaseBtn" class="link-btn hidden">← Отмена, вернуться к текущему релизу</button>
+    <!-- Логотип, а не стрелка загрузки: это первый экран приложения, и он
+         должен представлять Klutz, а не изображать действие. -->
     <div class="dz-icon">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/>
-      </svg>
+      <img class="logo-light" src="assets/logo-for-light-64.png" alt="" />
+      <img class="logo-dark" src="assets/logo-for-dark-64.png" alt="" />
     </div>
     <h2>Сначала нужен сам zapret</h2>
     <p class="dz-sub">
@@ -497,15 +498,10 @@
 
         <!-- Конфиги -->
         <div id="paneConfigs" class="pane">
-          <div class="search-row">
-            <div class="search-box">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
-                <circle cx="7" cy="7" r="4.6"/><line x1="10.4" y1="10.4" x2="14" y2="14"/>
-              </svg>
-              <input id="configSearch" type="text" placeholder="Поиск по конфигам…" spellcheck="false" />
-            </div>
-            <button class="btn ghost" id="changeReleaseBtn">Сменить релиз</button>
-          </div>
+          <!-- Поиска по конфигам здесь нет, как и в макете: их два десятка,
+               и ряд чипов-семейств ниже отбирает быстрее, чем набор текста.
+               «Сменить релиз» тоже убран — он остаётся в меню движка внизу
+               сайдбара и в Настройках, а тут был третьей копией. -->
           <div id="groupChips" class="group-chips"></div>
           <div id="configList" class="config-list"></div>
         </div>
@@ -608,12 +604,16 @@
             </div>
           </div>
           <div id="customAddressList"></div>
+          <p id="gamesMsg" class="area-msg"></p>
+          <!-- Строка поиска — последняя в карточке и вплотную к её краю, как
+               в макете. Сообщение gamesMsg стояло ниже неё и своим верхним
+               отступом отрывало строку от низа карточки даже когда было
+               пустым: у пустого абзаца отступ всё равно занимает место. -->
           <div class="cmd-row" id="openCmdBtn">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.6"/><line x1="10.4" y1="10.4" x2="14" y2="14"/></svg>
             <span class="cmd-row-text">Добавить игру, сервис или свой адрес…</span>
             <span class="cmd-row-key">Ctrl K</span>
           </div>
-          <p id="gamesMsg" class="area-msg"></p>
         </div>
 
         <div class="sec-row">

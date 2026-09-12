@@ -27,7 +27,6 @@ let testing = false;
 // Автоподбор отработал, но связь после него так и не появилась — Главная
 // показывает это отдельным состоянием, пока пользователь что-то не поменяет.
 let pickFailed = false;
-let searchQuery = '';
 let groupFilter = null;
 
 // ─────────── Тема ───────────
@@ -135,14 +134,23 @@ function prettyName(name) {
   return base;
 }
 
+// Семейства как в макете: базовый и все ALT — это один набор («Базовые»),
+// остальные собираются по префиксу. Раньше ALT жили отдельной группой из
+// тринадцати строк, а FAKE TLS AUTO и FAKE TLS AUTO ALT расходились по
+// разным семействам.
 function deriveGroup(name) {
-  const base = bareName(name);
-  const m = base.match(/^general\s*\((.+)\)$/i);
-  if (!m) return 'Базовый';
-  const content = m[1].trim();
-  if (/^ALT\d*$/i.test(content)) return 'ALT-варианты';
-  const stripped = content.replace(/\s*ALT\d*$/i, '').trim();
-  return stripped || content;
+  const p = prettyName(name);
+  if (p === 'Базовый' || /^ALT\d*$/i.test(p)) return 'Базовые';
+  if (/^FAKE TLS/i.test(p)) return 'FAKE TLS';
+  if (/^SIMPLE FAKE/i.test(p)) return 'SIMPLE FAKE';
+  if (/^MGTS/i.test(p)) return 'MGTS';
+  return p;
+}
+
+// Словами, а не процентом: «22 %» требует знать, из чего доля, а вердикт
+// читается сразу. Пороги те же, что у verdictColor.
+function verdictLabel(score) {
+  return score >= 0.85 ? 'Пробивает' : score >= 0.4 ? 'Частично' : 'Не пробивает';
 }
 
 function formatUptime(startedAt) {
@@ -821,10 +829,7 @@ $('homeAutoSwitchToggle').onclick = async () => {
 
 const configListEl = $('configList');
 
-$('configSearch').oninput = (e) => {
-  searchQuery = e.target.value;
-  renderConfigList();
-};
+// Поля поиска по конфигам больше нет — отбор делают чипы семейств.
 
 function closeMenus() {
   document.querySelectorAll('.menu').forEach((m) => m.remove());
@@ -933,13 +938,7 @@ function renderConfigList() {
 
   renderGroupChips();
 
-  const q = searchQuery.trim().toLowerCase();
-  const filtered = currentState.configs.filter((n) => prettyName(n).toLowerCase().includes(q));
-
-  if (!filtered.length) {
-    configListEl.innerHTML = '<div class="no-results">Ничего не найдено</div>';
-    return;
-  }
+  const filtered = currentState.configs;
 
   const groups = new Map();
   for (const name of filtered) {
@@ -971,31 +970,34 @@ function renderConfigList() {
         const row = document.createElement('div');
         row.className = 'cfg-row' + (isActive ? ' active' : '');
 
-        const tag = isActive
-          ? currentState.installedAsService
-            ? 'служба Windows'
-            : 'запущен разово'
-          : 'не активен';
+        // Плашку «не активен» убрали: ею была подписана каждая строка, кроме
+        // одной, — шум. У запущенной строка и так зелёная, а вот способ
+        // запуска (служба или разово) нигде больше не виден, его оставляем.
+        const runTag = isActive
+          ? `<span class="cfg-tag on">${currentState.installedAsService ? 'служба Windows' : 'запущен разово'}</span>`
+          : '';
 
         const testedRow = lastResultsCache?.rows.find((r) => r.config === name);
-        const verdictBadge = testedRow
+        const verdict = testedRow
           ? (() => {
               const score = verdictFor(testedRow, lastResultsCache.mode).score;
-              return `<span class="cfg-tag" style="color:${verdictColor(score)}" title="Доля проверенных целей, которые ответили">${Math.round(score * 100)}%</span>`;
+              return `<span class="cfg-verdict" style="color:${verdictColor(score)}" title="Доля проверенных целей, которые ответили: ${Math.round(score * 100)}%">${verdictLabel(score)}</span>`;
             })()
           : '';
+
+        const btnLabel = isActive ? 'Активен' : currentState.running ? 'Переключить' : 'Включить';
 
         row.innerHTML = `
           <div class="cfg-main">
             <div class="cfg-title-row">
               <span class="cfg-name">${esc(displayName(name))}</span>
-              <span class="cfg-tag${isActive ? ' on' : ''}">${tag}</span>
-              ${verdictBadge}
+              ${verdict}
+              ${runTag}
             </div>
             <div class="cfg-desc">${esc(name)}</div>
           </div>
           <div class="cfg-actions">
-            <button class="cfg-btn${isActive ? ' on' : ''}" ${isActive ? 'disabled' : ''}>${isActive ? 'Активен' : 'Применить'}</button>
+            <button class="cfg-btn${isActive ? ' on' : ''}" ${isActive ? 'disabled' : ''}>${btnLabel}</button>
             <button class="cfg-more" title="Ещё">⋯</button>
           </div>`;
 
@@ -1037,7 +1039,9 @@ function renderGroupChips() {
     const g = deriveGroup(name);
     counts.set(g, (counts.get(g) || 0) + 1);
   }
-  const chips = [{ label: 'Все', value: null }, ...[...counts.entries()].map(([g, n]) => ({ label: `${g} · ${n}`, value: g }))];
+  // Без «· N»: количество и так стоит в заголовке каждой группы ниже, а в
+  // чипе оно делало ряд длинным и пёстрым.
+  const chips = [{ label: 'Все', value: null }, ...[...counts.keys()].map((g) => ({ label: g, value: g }))];
   $('groupChips').innerHTML = chips
     .map((c) => `<div class="group-chip${c.value === groupFilter ? ' active' : ''}" data-g="${esc(c.value || '')}">${esc(c.label)}</div>`)
     .join('');
@@ -2759,7 +2763,6 @@ async function changeRelease() {
   render();
 }
 
-$('changeReleaseBtn').onclick = changeRelease;
 $('changeReleaseBtn2').onclick = changeRelease;
 
 $('openReleaseFolderBtn').onclick = async () => {

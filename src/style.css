@@ -274,11 +274,14 @@ html[data-theme="dark"] .icon-sun { display: block; }
    Специфичность намеренно задрана: .sb-logo img / .about-head img задают
    display: block и иначе перебивают эти правила. */
 .sb-logo img.logo-dark,
-.about-head img.logo-dark { display: none; }
+.about-head img.logo-dark,
+.dz-icon img.logo-dark { display: none; }
 html[data-theme="dark"] .sb-logo img.logo-light,
-html[data-theme="dark"] .about-head img.logo-light { display: none; }
+html[data-theme="dark"] .about-head img.logo-light,
+html[data-theme="dark"] .dz-icon img.logo-light { display: none; }
 html[data-theme="dark"] .sb-logo img.logo-dark,
-html[data-theme="dark"] .about-head img.logo-dark { display: block; }
+html[data-theme="dark"] .about-head img.logo-dark,
+html[data-theme="dark"] .dz-icon img.logo-dark { display: block; }
 
 .link-btn {
   border: none;
@@ -374,6 +377,7 @@ html[data-theme="dark"] .about-head img.logo-dark { display: block; }
   color: var(--green);
   background: var(--subtle);
 }
+.dz-icon img { width: 30px; height: 30px; display: block; }
 
 .dropzone-inner h2 {
   margin: 0 0 8px;
@@ -1280,6 +1284,15 @@ html[data-theme="dark"] .about-head img.logo-dark { display: block; }
   background: var(--pill);
 }
 .cfg-tag.on { color: var(--green); background: var(--green-bg); }
+
+/* Вердикт по последнему прогону — просто цветное слово, без плашки: цвет
+   уже несёт смысл, а обводка вокруг него спорила бы с плашкой способа
+   запуска рядом. */
+.cfg-verdict {
+  flex: 0 0 auto;
+  font-size: 13.5px;
+  font-weight: 500;
+}
 
 .cfg-desc { margin-top: 6px; font-size: 13.5px; color: var(--tx-4); }
 .cfg-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
