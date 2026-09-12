@@ -198,6 +198,21 @@ fn вес(proto: Proto, port: u16) -> u32 {
     }
 }
 
+/// Настоящий ли это процесс.
+///
+/// netstat вешает на PID 0 соединения, которые закрываются или чьи владельцы
+/// уже вышли, а PID 4 — это ядро. Оба выглядят как обычные строки с живыми
+/// портами: на этой машине «System Idle Process» так и вышел в кандидаты с
+/// портами 1119 и 27018. Адреса там настоящие, а владелец — нет, и следить
+/// за таким процессом бессмысленно: он никогда ничего не откроет.
+///
+/// Отсекаем по НОМЕРУ, а не по имени: имя псевдопроцесса переведено на
+/// русской Windows, и привязка к тексту сломалась бы там же, где и всё
+/// остальное.
+fn настоящий_процесс(pid: u32) -> bool {
+    pid > 4
+}
+
 /// Кандидат в игру: процесс и чем он себя выдал.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Candidate {
@@ -230,7 +245,7 @@ pub fn candidates(
     use std::collections::HashMap;
     let mut acc: HashMap<&str, (u32, BTreeSet<String>, BTreeSet<u16>)> = HashMap::new();
     for c in conns {
-        if !is_external(&c.ip) {
+        if !is_external(&c.ip) || !настоящий_процесс(c.pid) {
             continue;
         }
         let w = вес(c.proto, c.port);
@@ -656,9 +671,9 @@ mod unit_tests {
     fn игру_узнаём_по_нестандартным_портам() {
         use std::collections::HashMap;
         let names: HashMap<u32, String> = [
-            (1, "chrome.exe".to_string()),
-            (2, "cs2.exe".to_string()),
-            (3, "svchost.exe".to_string()),
+            (101, "chrome.exe".to_string()),
+            (202, "cs2.exe".to_string()),
+            (303, "svchost.exe".to_string()),
         ]
         .into_iter()
         .collect();
@@ -671,13 +686,13 @@ mod unit_tests {
         let conns = vec![
             // Браузер держит внешних соединений больше всех — и всё равно
             // не должен выигрывать.
-            c(1, "104.16.0.1", 443),
-            c(1, "104.16.0.2", 443),
-            c(1, "104.16.0.3", 443),
-            c(1, "104.16.0.4", 443),
-            c(3, "20.1.1.1", 443),
+            c(101, "104.16.0.1", 443),
+            c(101, "104.16.0.2", 443),
+            c(101, "104.16.0.3", 443),
+            c(101, "104.16.0.4", 443),
+            c(303, "20.1.1.1", 443),
             // А у игры свой порт.
-            c(2, "162.159.135.232", 27018),
+            c(202, "162.159.135.232", 27018),
         ];
         assert_eq!(guess_game(&conns, &names).as_deref(), Some("cs2.exe"));
     }
@@ -689,15 +704,40 @@ mod unit_tests {
         // выбирала «самого активного», и это было выдумкой — теперь
         // ответ «не нашли», а интерфейс попросит запустить игру.
         let names: HashMap<u32, String> = [
-            (1, "chrome.exe".to_string()),
-            (2, "SomeApp.exe".to_string()),
+            (101, "chrome.exe".to_string()),
+            (202, "SomeApp.exe".to_string()),
         ]
         .into_iter()
         .collect();
         let c = |pid, ip: &str, port| Conn { pid, proto: Proto::Tcp, ip: ip.parse().unwrap(), port };
-        let conns = vec![c(1, "1.1.1.1", 443), c(1, "1.1.1.2", 80), c(2, "8.8.8.8", 443)];
+        let conns = vec![c(101, "1.1.1.1", 443), c(101, "1.1.1.2", 80), c(202, "8.8.8.8", 443)];
         assert_eq!(guess_game(&conns, &names), None);
         assert!(candidates(&conns, &names).is_empty());
+    }
+
+    #[test]
+    fn псевдопроцессы_в_кандидаты_не_идут() {
+        use std::collections::HashMap;
+        // Ровно то, что вылезло на тесте: netstat отдал закрывающиеся
+        // соединения на игровых портах, повесив их на PID 0, и он вышел
+        // в кандидаты впереди Steam.
+        let names: HashMap<u32, String> = [
+            (0, "System Idle Process".to_string()),
+            (4, "System".to_string()),
+            (100, "steam.exe".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let c = |pid, ip: &str, port| Conn { pid, proto: Proto::Tcp, ip: ip.parse().unwrap(), port };
+        let conns = vec![
+            c(0, "104.16.0.1", 1119),
+            c(0, "104.16.0.2", 27018),
+            c(4, "104.16.0.3", 27015),
+            c(100, "155.133.226.76", 27023),
+        ];
+        let got = candidates(&conns, &names);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].name, "steam.exe");
     }
 
     #[test]
@@ -705,9 +745,9 @@ mod unit_tests {
         use std::collections::HashMap;
         // Ровно тот случай, на котором эвристика однажды и попалась:
         // служба HP стучалась на 5228 — это уведомления Google, не игра.
-        let names: HashMap<u32, String> = [(1, "happd.exe".to_string())].into_iter().collect();
+        let names: HashMap<u32, String> = [(404, "happd.exe".to_string())].into_iter().collect();
         let conns = vec![Conn {
-            pid: 1,
+            pid: 404,
             proto: Proto::Tcp,
             ip: "142.250.153.188".parse().unwrap(),
             port: 5228,
@@ -719,22 +759,22 @@ mod unit_tests {
     fn udp_на_высоком_порту_весит_больше_веба() {
         use std::collections::HashMap;
         let names: HashMap<u32, String> = [
-            (1, "launcher.exe".to_string()),
-            (2, "VALORANT-Win64-Shipping.exe".to_string()),
+            (101, "launcher.exe".to_string()),
+            (202, "VALORANT-Win64-Shipping.exe".to_string()),
         ]
         .into_iter()
         .collect();
         // Лаунчер держит кучу TCP на игровом порту, игра — один UDP.
         let mut conns: Vec<Conn> = (0..3)
             .map(|i| Conn {
-                pid: 1,
+                pid: 101,
                 proto: Proto::Tcp,
                 ip: format!("104.16.0.{i}").parse().unwrap(),
                 port: 7000,
             })
             .collect();
         conns.push(Conn {
-            pid: 2,
+            pid: 202,
             proto: Proto::Udp,
             ip: "162.159.1.1".parse().unwrap(),
             port: 5060,
@@ -749,9 +789,9 @@ mod unit_tests {
     #[test]
     fn внутренние_адреса_в_догадку_не_идут() {
         use std::collections::HashMap;
-        let names: HashMap<u32, String> = [(2, "game.exe".to_string())].into_iter().collect();
+        let names: HashMap<u32, String> = [(202, "game.exe".to_string())].into_iter().collect();
         let conns = vec![Conn {
-            pid: 2,
+            pid: 202,
             proto: Proto::Udp,
             ip: "192.168.1.1".parse().unwrap(),
             port: 27015,
