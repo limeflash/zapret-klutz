@@ -365,6 +365,12 @@ pub fn http_probe_pinned(host: &str, port: u16, pin_ip: Option<&str>, timeout_se
 /// ничего не доказывает, через потолок надо реально перелезть.
 pub const VOLUME_FLOOR: u64 = 64 * 1024;
 
+/// Сколько байт просим у сервера. Ровно вдвое больше потолка: чтобы
+/// доказать, что поток пережил окно отсечки, дальше качать нечего, а
+/// страница ютуба — почти мегабайт за каждую проверку. На мобильном
+/// интернете предпроверка перед прогоном это заметный трафик.
+pub const VOLUME_FETCH: u64 = VOLUME_FLOOR * 2;
+
 /// Что стало с потоком после того, как сервер ответил.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -446,30 +452,49 @@ pub fn http_probe_volume(
         format!("{scheme}://{host}:{port}")
     };
 
-    #[allow(unused_mut)]
-    let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
-    no_proxy(&mut cmd);
-    cmd.args([
-        "-s",
-        "-o",
-        "NUL",
-        "-w",
-        "%{http_code} %{size_download}",
-        "-m",
-        &timeout_sec.to_string(),
-        // Браузерный User-Agent: часть целей отдаёт обрезанную заглушку в
-        // ответ на пустой, и мерили бы мы её, а не настоящую страницу.
-        "-H",
-        "User-Agent: Mozilla/5.0",
-    ]);
-    if let Some(ip) = pin_ip {
-        cmd.args(["--resolve", &format!("{host}:{port}:{ip}")]);
-    }
-    cmd.arg(&url);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
+    // Один запрос. `ranged` — просить ли только первые VOLUME_FETCH байт.
+    let fetch = |ranged: bool| -> Option<(Option<u16>, u64, bool)> {
+        #[allow(unused_mut)]
+        let mut cmd = Command::new(crate::sys::system_exe("curl.exe"));
+        no_proxy(&mut cmd);
+        cmd.args([
+            "-s",
+            "-o",
+            "NUL",
+            "-w",
+            "%{http_code} %{size_download}",
+            "-m",
+            &timeout_sec.to_string(),
+            // Браузерный User-Agent: часть целей отдаёт обрезанную заглушку в
+            // ответ на пустой, и мерили бы мы её, а не настоящую страницу.
+            "-H",
+            "User-Agent: Mozilla/5.0",
+        ]);
+        if ranged {
+            cmd.args(["--range", &format!("0-{}", VOLUME_FETCH - 1)]);
+        }
+        if let Some(ip) = pin_ip {
+            cmd.args(["--resolve", &format!("{host}:{port}:{ip}")]);
+        }
+        cmd.arg(&url);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
 
-    let Ok(out) = cmd.output() else {
+        let out = cmd.output().ok()?;
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let mut parts = raw.split_whitespace();
+        let status = parts.next().and_then(|v| v.parse::<u16>().ok()).filter(|s| *s >= 100);
+        let bytes = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        Some((status, bytes, out.status.success()))
+    };
+
+    // Сервер, не принимающий диапазон, отвечает 416: он «ответил», но тела
+    // нет — без повтора это выглядело бы как «ответ целиком и он крошечный».
+    let measured = match fetch(true) {
+        Some((Some(416), _, _)) => fetch(false),
+        other => other,
+    };
+    let Some((status, bytes, complete)) = measured else {
         return VolumeResult {
             verdict: VolumeVerdict::NotApplicable,
             note: "не удалось запустить curl".into(),
@@ -477,11 +502,6 @@ pub fn http_probe_volume(
             status: None,
         };
     };
-    let raw = String::from_utf8_lossy(&out.stdout);
-    let mut parts = raw.split_whitespace();
-    let status = parts.next().and_then(|v| v.parse::<u16>().ok()).filter(|s| *s >= 100);
-    let bytes = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-    let complete = out.status.success();
     let (verdict, note) = classify_volume(status, bytes, complete);
     VolumeResult { verdict, note, bytes, status }
 }
@@ -781,6 +801,26 @@ mod unit_tests {
             uniq.dedup();
             assert_eq!(uniq.len(), ips.len(), "{host}: есть повторы");
         }
+    }
+
+    /// Просить меньше, чем нужно для вывода, нельзя: тогда «перелезли через
+    /// потолок» не докажет ничего, а именно это проба и меряет.
+    #[test]
+    fn запрашиваемый_объём_выше_потолка() {
+        assert!(
+            VOLUME_FETCH > VOLUME_FLOOR,
+            "просим {VOLUME_FETCH} байт при потолке {VOLUME_FLOOR}"
+        );
+    }
+
+    /// Диапазонный запрос получает 206, и это полноценный ответ сервера:
+    /// иначе экономия трафика превратила бы «поток чист» в «сервер не
+    /// ответил».
+    #[test]
+    fn частичный_ответ_считается_ответом() {
+        assert!(code_is_answer(206), "206 — ответ на диапазонный запрос");
+        let (verdict, _) = classify_volume(Some(206), VOLUME_FETCH, true);
+        assert_eq!(verdict, VolumeVerdict::Clear);
     }
 
     /// Живая проверка самой функции, а не правила: строится ли командная
