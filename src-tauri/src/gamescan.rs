@@ -162,7 +162,7 @@ fn служебный_порт(port: u16) -> bool {
         port,
         53 | 67 | 68 | 88 | 123 | 135 | 137..=139 | 389 | 445 | 465 | 500
             | 514 | 587 | 636 | 993 | 995 | 1194 | 1701 | 1723 | 1900
-            | 3389 | 5222 | 5228..=5230 | 5353 | 5938 | 8080 | 8443 | 8883 | 9443
+            | 3389 | 5222 | 5223 | 5228..=5230 | 5353 | 5938 | 8080 | 8443 | 8883 | 9443
     )
 }
 
@@ -470,17 +470,24 @@ pub fn clear_ips(root: &std::path::Path) -> Result<(), String> {
 ///   `dpi desync src=1.2.3.4:52000 dst=5.6.7.8:27015`
 /// Разбираем обе и не привязываемся к остальному тексту: он меняется от
 /// версии к версии, а адрес — нет.
-pub fn parse_log_addr(line: &str) -> Option<(IpAddr, u16)> {
+pub fn parse_log_addr(line: &str) -> Option<(IpAddr, u16, Proto)> {
+    // Протокол winws пишет в начале строки conntrack: «TCP [..]:.. => ..».
+    // У строки «dpi desync» его нет — там считаем UDP не вправе, поэтому
+    // берём по наличию слова, а при отсутствии не угадываем: такие строки
+    // относим к TCP, и правило для TCP строже, то есть ошибка будет в
+    // сторону «не собрали», а не «собрали лишнее».
+    let upper = line.to_ascii_uppercase();
+    let proto = if upper.contains("UDP") { Proto::Udp } else { Proto::Tcp };
     if let Some(rest) = line.split("dst=").nth(1) {
         let token = rest.split_whitespace().next()?;
-        if let Some(a) = split_addr(token) {
-            return Some(a);
+        if let Some((ip, port)) = split_addr(token) {
+            return Some((ip, port, proto));
         }
     }
     if let Some(rest) = line.split("=> ").nth(1) {
         let token = rest.split_whitespace().next()?;
-        if let Some(a) = split_addr(token) {
-            return Some(a);
+        if let Some((ip, port)) = split_addr(token) {
+            return Some((ip, port, proto));
         }
     }
     None
@@ -523,12 +530,8 @@ pub fn harvest_len() -> usize {
 pub fn harvest_line(line: &str) {
     let mut g = HARVEST.lock().unwrap_or_else(|e| e.into_inner());
     let Some(set) = g.as_mut() else { return };
-    if let Some((ip, port)) = parse_log_addr(line) {
-        // Только внешнее и только не веб. winws видит и 80 с 443 — там
-        // сайты, и им в ИГРОВОМ списке делать нечего: он и так применяется
-        // к вебу отдельными профилями, а здесь его адреса попали бы ещё и
-        // под игровой, с чужими для них настройками.
-        if is_external(&ip) && стоит_собирать(port) {
+    if let Some((ip, port, proto)) = parse_log_addr(line) {
+        if is_external(&ip) && стоит_собирать(proto, port) {
             set.insert(ip.to_string());
         }
     }
@@ -554,9 +557,27 @@ fn веб_порт(port: u16) -> bool {
     )
 }
 
-/// Порт, с которого адрес имеет смысл класть в игровой список.
-fn стоит_собирать(port: u16) -> bool {
-    port >= 1024 && !веб_порт(port) && !служебный_порт(port)
+/// Стоит ли класть в игровой список адрес с этого порта и протокола.
+///
+/// Правило разное для TCP и UDP, и вот почему. Снятый с Valorant трафик
+/// показал: по TCP он ходит ТОЛЬКО в веб — Cloudflare на 443, чат на 5223,
+/// античит на 8443. Ни одного игрового адреса по TCP там нет вовсе, зато
+/// пролезала чужая сеть Cloudflare. А у CS2 по TCP есть настоящий игровой
+/// адрес — менеджер соединений Steam на 27018.
+///
+/// Значит для TCP нужен известный игровой диапазон, а не «всё, кроме
+/// веба»: слишком много веба ходит по нестандартным портам, и каждый раз
+/// он оказывается в игровом списке. Для UDP наоборот — там почти не бывает
+/// ничего, кроме игр и QUIC, и ограничивать диапазоном значило бы
+/// пропустить игру на неизвестном порту.
+fn стоит_собирать(proto: Proto, port: u16) -> bool {
+    if port < 1024 || веб_порт(port) || служебный_порт(port) {
+        return false;
+    }
+    match proto {
+        Proto::Udp => true,
+        Proto::Tcp => игровой_порт(port),
+    }
 }
 
 // ─────────── блок адресов игр внутри ipset-all.txt ───────────
@@ -917,18 +938,18 @@ mod unit_tests {
     #[test]
     fn адрес_из_строки_лога_winws() {
         // Форма conntrack.
-        let (ip, port) = parse_log_addr("UDP [192.168.1.5]:52000 => [162.159.135.232]:27015 : t0=1").unwrap();
+        let (ip, port, _) = parse_log_addr("UDP [192.168.1.5]:52000 => [162.159.135.232]:27015 : t0=1").unwrap();
         assert_eq!(ip.to_string(), "162.159.135.232");
         assert_eq!(port, 27015);
 
         // Форма «dpi desync». Она важнее: у неё dst стоит явно, и её мы
         // проверяем первой.
-        let (ip, port) = parse_log_addr("dpi desync src=192.168.1.5:52000 dst=104.16.0.1:443").unwrap();
+        let (ip, port, _) = parse_log_addr("dpi desync src=192.168.1.5:52000 dst=104.16.0.1:443").unwrap();
         assert_eq!(ip.to_string(), "104.16.0.1");
         assert_eq!(port, 443);
 
         // IPv6 в скобках.
-        let (ip, _) = parse_log_addr("TCP [fe80::1]:1 => [2606:4700::1]:443 : x").unwrap();
+        let (ip, _, _) = parse_log_addr("TCP [fe80::1]:1 => [2606:4700::1]:443 : x").unwrap();
         assert_eq!(ip.to_string(), "2606:4700::1");
     }
 
@@ -959,6 +980,28 @@ mod unit_tests {
         // Уже сеть или IPv6 — оставляем как есть.
         assert_eq!(to_subnet("2606:4700::1"), "2606:4700::1");
         assert_eq!(to_subnet("не адрес"), "не адрес");
+    }
+
+    #[test]
+    fn по_tcp_берём_только_игровые_порты_а_по_udp_всё() {
+        // Снято с живого Valorant: по TCP он ходит ТОЛЬКО в веб, и оттуда
+        // в игровой список лезла чужая сеть Cloudflare. Игрового адреса по
+        // TCP у него нет вовсе.
+        assert!(!стоит_собирать(Proto::Tcp, 443));
+        assert!(!стоит_собирать(Proto::Tcp, 5223), "чат Riot — это не игра");
+        assert!(!стоит_собирать(Proto::Tcp, 8443), "античит по HTTPS");
+        assert!(!стоит_собирать(Proto::Tcp, 49152), "случайный высокий порт");
+        // А у CS2 по TCP игровой адрес есть — менеджер соединений Steam.
+        assert!(стоит_собирать(Proto::Tcp, 27018));
+        assert!(стоит_собирать(Proto::Tcp, 1119), "Battle.net");
+        // По UDP берём широко: там почти не бывает ничего, кроме игр, и
+        // ограничив диапазоном, мы пропустили бы игру на чужом порту.
+        assert!(стоит_собирать(Proto::Udp, 27015));
+        assert!(стоит_собирать(Proto::Udp, 7000));
+        assert!(стоит_собирать(Proto::Udp, 61337), "неизвестный порт — всё равно берём");
+        // Но и там веб со служебным не нужны.
+        assert!(!стоит_собирать(Proto::Udp, 443), "QUIC — это веб");
+        assert!(!стоит_собирать(Proto::Udp, 53), "DNS");
     }
 
     #[test]

@@ -179,7 +179,12 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
 
     if let Some(mut args) = args.filter(|_| winws_exe.exists()) {
         if debug {
-            args.push("--debug".into());
+            // Именно со значением. У winws это `--debug=0|1|syslog|@<файл>`,
+            // и голый флаг он не принимает — я передавал его без значения, и
+            // подробный режим не включался вовсе. Сбор при этом «работал»:
+            // разбирал обычный вывод и находил один-два адреса вместо
+            // десятков, из-за чего выглядел рабочим, но бесполезным.
+            args.push("--debug=1".into());
         }
         *state.winws_intentional_stop.lock().unwrap() = false;
         #[allow(unused_mut)]
