@@ -2534,12 +2534,38 @@ $('importSettingsBtn').onclick = async () => {
 
 const IPSET_LABELS = { any: 'любые IP (any)', none: 'нет (none)', loaded: 'загружен список' };
 const gameFilterSeg = $('gameFilterSeg');
+
+// Про Game Filter пользователю надо знать одну вещь, и она не очевидна:
+// для сетевой игры он чаще вредит, чем помогает. Обход разбирает и
+// пересобирает пакеты, а игровой UDP этого не прощает — в CS2 это видно
+// как рывки и телепорты, у Valorant как ошибка подключения. В наборах
+// zapret2 игровой UDP Riot и Valorant поэтому прямо помечен «не трогать».
+function renderGameFilterNote(mode) {
+    const d = $('gameFilterDesc');
+    if (!d) return;
+    if (mode === 'udp' || mode === 'all') {
+        d.innerHTML =
+            'Игровые порты (1024–65535) идут через обход. ' +
+            '<b>UDP так лучше не пускать:</b> игровой трафик плохо переносит ' +
+            'пересборку пакетов — в CS2 это рывки и телепорты, у Valorant ошибка ' +
+            'подключения. Включай, только если без этого игра не запускается вовсе.';
+    } else if (mode === 'tcp') {
+        d.textContent =
+            'Через обход идут игровые порты TCP. Для входа в игру и лаунчеров обычно ' +
+            'достаточно этого, а игровой UDP остаётся нетронутым — так и надо.';
+    } else {
+        d.textContent =
+            'Игровые порты через обход не идут. Подходит, пока игры заходят: ' +
+            'сам матч так точно ничего не теряет.';
+    }
+}
 const autoUpdateToggle = $('autoUpdateToggle');
 
 async function loadToggles() {
   const t = await window.zapret.getToggles();
   if (!t || !t.gameMode) return;
   gameFilterSeg.querySelectorAll('.seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.gf === t.gameMode));
+  renderGameFilterNote(t.gameMode);
   $('ipsetVal').textContent = IPSET_LABELS[t.ipsetMode] || t.ipsetMode;
   autoUpdateToggle.classList.toggle('on', !!t.autoUpdate);
 }
@@ -2550,6 +2576,7 @@ gameFilterSeg.querySelectorAll('.seg-btn').forEach((b) => {
     if (prev === b) return;
     gameFilterSeg.querySelectorAll('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
 
+    renderGameFilterNote(b.dataset.gf);
     const res = await window.zapret.setGameFilter(b.dataset.gf);
     if (!res.ok) {
       // Запись в папку релиза могла не пройти — не оставляем сегмент
@@ -2798,12 +2825,12 @@ $('copyDiagBtn').onclick = async () => {
   }
 };
 
-async function runDiagnosticsAndRender() {
+async function runDiagnosticsAndRender(deep) {
   const box = $('diagResults');
   $('diagHint').classList.add('hidden');
   $('runDiagBtn').disabled = true;
   box.innerHTML = '<div class="diag-row"><span class="dr-icon">·</span><span>Проверяю…</span></div>';
-  const res = await window.zapret.runDiagnostics();
+  const res = await window.zapret.runDiagnostics(deep);
   $('runDiagBtn').disabled = false;
   lastDiagResults = res.ok ? res.results : null;
   const bad = res.results.filter((r) => !r.ok).length;
@@ -2838,7 +2865,9 @@ async function runDiagnosticsAndRender() {
   });
 }
 
-$('runDiagBtn').onclick = runDiagnosticsAndRender;
+// По кнопке — с глубокими сетевыми пробами; при открытии страницы без
+// них, иначе каждый запуск приложения стоил бы мегабайта трафика.
+$('runDiagBtn').onclick = () => runDiagnosticsAndRender(true);
 
 // ─────────── Смена релиза ───────────
 

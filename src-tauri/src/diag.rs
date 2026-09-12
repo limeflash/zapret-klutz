@@ -42,7 +42,60 @@ fn timestamps_enabled() -> bool {
         .unwrap_or(false)
 }
 
-pub fn run_diagnostics(root: Option<&Path>) -> Vec<DiagRow> {
+/// `deep` — гонять ли сетевые пробы, которые стоят времени и трафика.
+/// Страница вызывает эту функцию и сама при открытии; качать там мегабайт
+/// на каждый запуск приложения незачем, поэтому глубокое — только по
+/// кнопке «Проверить».
+/// Пробы, которые отвечают на вопрос «а обход тут вообще применим».
+///
+/// Берём одну цель — `www.youtube.com`: она и блокируется чаще прочих, и
+/// отдаёт страницу заведомо больше потолка отсечки, так что проба объёма
+/// на ней осмысленна. Discord в этой роли хуже: половина его эндпоинтов
+/// отвечает короткими страницами ошибок.
+fn deep_network_rows() -> Vec<DiagRow> {
+    const HOST: &str = "www.youtube.com";
+    let mut out = Vec::new();
+
+    let Some(ip) = crate::probe::resolve_ips(HOST, 443).into_iter().next() else {
+        out.push(DiagRow {
+            label: "Глубокая проверка сети".into(),
+            ok: false,
+            fix_key: None,
+            warn: Some(format!("{HOST} не разрешается — проверить нечего")),
+        });
+        return out;
+    };
+
+    if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+        let frag = crate::tlsprobe::probe_fragmentation(addr, 443, HOST, std::time::Duration::from_secs(4));
+        out.push(DiagRow {
+            label: "Разрез ClientHello пробивает".into(),
+            // «Не пробивает» — это плохо, а «нечего пробивать» и «не
+            // удалось проверить» плохими не считаем: там нет вывода.
+            ok: frag.verdict != crate::tlsprobe::FragVerdict::DoesNotHelp,
+            fix_key: None,
+            warn: match frag.verdict {
+                crate::tlsprobe::FragVerdict::NotBlocked => None,
+                _ => Some(frag.note),
+            },
+        });
+    }
+
+    let vol = crate::probe::http_probe_volume(HOST, 443, Some(&ip), 20);
+    out.push(DiagRow {
+        label: "Ответ доезжает целиком".into(),
+        ok: vol.verdict != crate::probe::VolumeVerdict::Cutoff,
+        fix_key: None,
+        warn: match vol.verdict {
+            crate::probe::VolumeVerdict::Clear => None,
+            _ => Some(vol.note),
+        },
+    });
+
+    out
+}
+
+pub fn run_diagnostics(root: Option<&Path>, deep: bool) -> Vec<DiagRow> {
     let mut out = Vec::new();
     let services = all_services();
 
@@ -119,6 +172,10 @@ pub fn run_diagnostics(root: Option<&Path>) -> Vec<DiagRow> {
     // Она тут потому, что ответ на неё ничего не говорит о стратегии: если
     // UDP наружу не выпускают, голос Discord не заработает ни с каким
     // конфигом, и перебирать их — время впустую.
+    if deep {
+        out.extend(deep_network_rows());
+    }
+
     let udp = crate::udpprobe::probe_udp(std::time::Duration::from_secs(3));
     out.push(DiagRow {
         label: "UDP наружу проходит (голос Discord, QUIC)".into(),

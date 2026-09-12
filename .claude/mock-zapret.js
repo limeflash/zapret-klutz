@@ -166,7 +166,7 @@
       releaseUrl: 'https://github.com/Flowseal/zapret-discord-youtube/releases/tag/1.9.10',
     }),
     clearDiscordCache: noop,
-    runDiagnostics: async () => ({
+    runDiagnostics: async (deep) => ({
       ok: true,
       results: [
         { label: 'Служба фильтрации Windows (BFE)', ok: true },

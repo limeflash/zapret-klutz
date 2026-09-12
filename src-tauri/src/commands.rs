@@ -769,9 +769,12 @@ pub struct DiagResult {
 }
 
 #[tauri::command(async)]
-pub fn run_diagnostics(state: State<AppState>) -> DiagResult {
+pub fn run_diagnostics(state: State<AppState>, deep: Option<bool>) -> DiagResult {
     let root = root_of(&state);
-    DiagResult { ok: true, results: crate::diag::run_diagnostics(root.as_deref()) }
+    DiagResult {
+        ok: true,
+        results: crate::diag::run_diagnostics(root.as_deref(), deep.unwrap_or(false)),
+    }
 }
 
 #[tauri::command(async)]

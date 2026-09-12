@@ -97,7 +97,7 @@
     updateHostsFile: () => invoke('update_hosts_file'),
     checkUpdates: () => invoke('check_updates'),
     clearDiscordCache: () => invoke('clear_discord_cache'),
-    runDiagnostics: () => invoke('run_diagnostics'),
+    runDiagnostics: (deep) => invoke('run_diagnostics', { deep: !!deep }),
     fixDiagnostic: (key) => invoke('fix_diagnostic', { key }),
     getCustomLists: () => invoke('get_custom_lists'),
     saveCustomLists: (l) => invoke('save_custom_lists', { include: (l&&l.include)||'', exclude: (l&&l.exclude)||'' }),
