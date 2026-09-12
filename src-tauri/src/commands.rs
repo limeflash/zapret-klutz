@@ -1168,7 +1168,7 @@ pub fn get_test_history(state: State<AppState>) -> HistoryResult {
             .collect(),
         Err(_) => return HistoryResult { ok: true, runs: vec![], configs: vec![] },
     };
-    dated.sort_by(|a, b| a.0.cmp(&b.0));
+    dated.sort_by_key(|(time, _)| *time);
     let files: Vec<String> = dated.into_iter().map(|(_, n)| n).collect();
 
     let mut runs = Vec::new();

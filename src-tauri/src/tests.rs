@@ -419,9 +419,9 @@ mod unit_tests {
 
     #[test]
     fn сортировка_по_rank_desc_ставит_лучшее_первым() {
-        let mut rows = vec![row_p(3, 4, 7, 0), row_p(7, 0, 0, 7), row_p(5, 2, 7, 0)];
+        let mut rows = [row_p(3, 4, 7, 0), row_p(7, 0, 0, 7), row_p(5, 2, 7, 0)];
         rows.sort_by(|a, b| rank_desc(a, b, false));
-        assert_eq!(rows.iter().map(|r| r.ok).collect::<Vec<_>>(), vec![7, 5, 3]);
+        assert_eq!(rows.iter().map(|r| r.ok).collect::<Vec<_>>(), [7, 5, 3]);
         // min_by по тому же порядку обязан дать ту же голову: им пользуются
         // автопрогон и история, а сортировкой — трей и самолечение.
         let best = rows.iter().min_by(|a, b| rank_desc(a, b, false)).unwrap();

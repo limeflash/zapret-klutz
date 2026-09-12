@@ -162,7 +162,7 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn base64(data: &[u8]) -> String {
-    let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
         let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
@@ -215,7 +215,9 @@ fn icon_hrefs(html: &str) -> Vec<String> {
         }
         found.push((weight, href.trim().to_string()));
     }
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    // По убыванию размера; сортировка устойчива, поэтому среди равных
+    // сохраняется порядок из разметки.
+    found.sort_by_key(|(weight, _)| std::cmp::Reverse(*weight));
     found.into_iter().map(|(_, h)| h).collect()
 }
 
