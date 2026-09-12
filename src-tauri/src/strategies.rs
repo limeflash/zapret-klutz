@@ -78,6 +78,25 @@ fn fooling_values(root: &Path, template_value: Option<&str>) -> Vec<String> {
     out
 }
 
+/// Замена только в строках, которые bat действительно исполняет.
+///
+/// Регулярное выражение не различает команду и текст: `rem` с примером
+/// флага или `echo` с подсказкой правились наравне с рабочей строкой. Это
+/// не ломало конфиг, но делало его комментарии враньём — а читает их
+/// человек, который потом по ним и настраивает.
+fn replace_outside_comments(text: &str, re: &Regex, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let head = line.trim_start().to_lowercase();
+        if head.starts_with("rem ") || head.starts_with("::") || head.starts_with("echo ") {
+            out.push_str(line);
+        } else {
+            out.push_str(&re.replace_all(line, to));
+        }
+    }
+    out
+}
+
 /// Имя варианта несёт и шаблон, и суффикс. Без шаблона два поколения из
 /// разных конфигов давали одни и те же имена, и второе молча затирало
 /// первое — при том что содержимое у них разное.
@@ -130,11 +149,31 @@ pub fn generate(root: &Path, template: &str) -> Result<Vec<String>, String> {
     }
 
     let mut made = Vec::new();
+    // Пишем через замыкание, чтобы на любой ошибке убрать уже созданное:
+    // иначе на полпути (нет места, отняли права) в папке релиза оставалась
+    // половина набора, и пользователь получал случайную выборку вариантов.
+    let write = |name: String, body: String, made: &mut Vec<String>| -> Result<(), String> {
+        match fs::write(root.join(&name), body) {
+            Ok(()) => {
+                made.push(name);
+                Ok(())
+            }
+            Err(e) => Err(format!("{name}: {e}")),
+        }
+    };
+    let rollback = |made: &[String]| {
+        for n in made {
+            let _ = fs::remove_file(root.join(n));
+        }
+    };
+
     for (suffix, pos) in EXTRA_SPLIT_POS {
-        let body = SPLIT_POS.replace_all(&text, format!("--dpi-desync-split-pos={pos}").as_str());
+        let body = replace_outside_comments(&text, &SPLIT_POS, &format!("--dpi-desync-split-pos={pos}"));
         let name = variant_name(template, suffix);
-        fs::write(root.join(&name), body.as_ref()).map_err(|e| format!("{name}: {e}"))?;
-        made.push(name);
+        if let Err(e) = write(name, body, &mut made) {
+            rollback(&made);
+            return Err(e);
+        }
     }
 
     // Вторая ось. Позиция разреза отвечает на вопрос «где резать», приём
@@ -143,10 +182,12 @@ pub fn generate(root: &Path, template: &str) -> Result<Vec<String>, String> {
     // сверяет контрольную сумму, а часть нет.
     let own = FOOLING.captures(&text).map(|c| c[1].to_string());
     for value in fooling_values(root, own.as_deref()) {
-        let body = FOOLING.replace_all(&text, format!("--dpi-desync-fooling={value}").as_str());
+        let body = replace_outside_comments(&text, &FOOLING, &format!("--dpi-desync-fooling={value}"));
         let name = variant_name(template, &format!("обман {value}"));
-        fs::write(root.join(&name), body.as_ref()).map_err(|e| format!("{name}: {e}"))?;
-        made.push(name);
+        if let Err(e) = write(name, body, &mut made) {
+            rollback(&made);
+            return Err(e);
+        }
     }
     Ok(made)
 }
@@ -194,6 +235,52 @@ mod unit_tests {
             "--filter-udp=443 --dpi-desync=multisplit --dpi-desync-split-pos=2 --dpi-desync-repeats=6",
         ]
         .join("\r\n")
+    }
+
+    #[test]
+    fn комментарии_и_echo_не_правятся() {
+        let dir = релиз();
+        let текст = [
+            "@echo off",
+            "rem пример: --dpi-desync-split-pos=1,midsld",
+            ":: и так тоже пишут --dpi-desync-split-pos=2",
+            "echo Текущая точка разреза: --dpi-desync-split-pos=1,midsld",
+            "start \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=443 ^",
+            "--filter-tcp=443 --dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=ts",
+        ]
+        .join("\r\n");
+        fs::write(dir.join("general.bat"), текст).unwrap();
+
+        generate(&dir, "general.bat").unwrap();
+        let v = fs::read_to_string(dir.join(variant_name(TPL, "sld1"))).unwrap();
+
+        // Рабочая строка заменена...
+        assert!(v.contains("--dpi-desync=fake,multisplit --dpi-desync-split-pos=sld+1"), "{v}");
+        // ...а пояснения для человека остались прежними.
+        assert!(v.contains("rem пример: --dpi-desync-split-pos=1,midsld"), "{v}");
+        assert!(v.contains(":: и так тоже пишут --dpi-desync-split-pos=2"), "{v}");
+        assert!(v.contains("echo Текущая точка разреза: --dpi-desync-split-pos=1,midsld"), "{v}");
+    }
+
+    #[test]
+    fn ошибка_записи_не_оставляет_половину_набора() {
+        let dir = релиз();
+        fs::write(dir.join("general.bat"), образец()).unwrap();
+        // Занимаем именем одного из вариантов КАТАЛОГ: запись в него не
+        // пройдёт, а часть файлов к тому моменту уже создана.
+        let занято = dir.join(variant_name(TPL, "multi8"));
+        fs::create_dir_all(&занято).unwrap();
+
+        assert!(generate(&dir, "general.bat").is_err());
+        // Ни одного варианта-ФАЙЛА остаться не должно. Каталог-заглушку,
+        // которым мы и сломали запись, считать не надо: его создал тест.
+        let файлов = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .filter(|e| is_variant(&e.file_name().to_string_lossy()))
+            .count();
+        assert_eq!(файлов, 0, "остались обломки набора");
     }
 
     #[test]

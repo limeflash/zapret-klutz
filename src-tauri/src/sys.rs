@@ -32,9 +32,33 @@ pub fn os_random(buf: &mut [u8]) -> bool {
 /// часть команд мы запускаем с `current_dir` в папке релиза — то есть в
 /// каталоге, который пользователь мог распаковать из чужого архива.
 /// Подложенный туда `cmd.exe` исполнился бы с правами администратора.
+/// Каталог Windows. Спрашиваем у самой системы, а не у переменной
+/// окружения: `SystemRoot` наследуется от того, кто нас запустил, и её
+/// значение — просто строка в нашем же процессе. Подставив туда свой
+/// каталог, можно было подсунуть свой `sc.exe` или `reg.exe`, а запускаем
+/// мы их с правами администратора. Ровно ту дыру, ради которой появился
+/// `system_exe`, переменная и оставляла открытой.
+#[cfg(target_os = "windows")]
+fn windows_dir() -> std::path::PathBuf {
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 260];
+    // Возвращает System32; нам нужен каталог уровнем выше.
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    if n == 0 || n >= buf.len() {
+        return std::path::PathBuf::from("C:\\Windows");
+    }
+    let sys32 = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n]));
+    sys32.parent().map(|p| p.to_path_buf()).unwrap_or(sys32)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("C:\\Windows")
+}
+
 pub fn system_exe(name: &str) -> std::path::PathBuf {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-    let root = std::path::Path::new(&root);
+    let root = windows_dir();
+    let root = root.as_path();
     // powershell лежит не в корне System32, explorer — не в System32 вовсе.
     for candidate in [
         root.join("System32").join(name),

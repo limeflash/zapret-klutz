@@ -13,10 +13,11 @@ use crate::targets;
 use crate::winws;
 
 fn now_ms() -> u64 {
+    // Часы пользователя могут стоять до 1970-го — это не повод падать.
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// К какому сервису относится цель. Признак — имя, а его пользователь может
@@ -204,7 +205,7 @@ fn tick(app: &AppHandle) {
     };
     let ticks = {
         let mut t = state.degraded_ticks.lock().unwrap();
-        *t += 1;
+        *t = t.saturating_add(1);
         *t
     };
     if ticks < threshold || !enabled {
@@ -392,7 +393,16 @@ fn attempt_switch(app: &AppHandle) {
 /// Включает конфиг тем же способом, каким сейчас работает обход: службой,
 /// если стоит служба, иначе прямым запуском winws. Общий путь для
 /// самолечения и меню «Переключить на» в трее.
+/// Переключение стратегии — по одному за раз.
+///
+/// Звать `apply_config` могут трое сразу: окно, меню в трее и самолечение.
+/// Без замка два вызова поднимали по своему winws, а `active_config`
+/// доставался тому, кто записал последним, — показанная стратегия и
+/// работающая расходились.
+static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn apply_config(app: &AppHandle, name: &str) -> Result<(), String> {
+    let _guard = APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let state = app.state::<AppState>();
     let (root, as_service) = {
         let p = state.persisted.lock().unwrap();

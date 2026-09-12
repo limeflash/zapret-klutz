@@ -539,25 +539,35 @@ pub fn tcp_probe(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
     // каждого адреса из DNS, и хост с восемью A-записями отваливался не за
     // 4 секунды, а за 32 — «Проверить связь» висла на полминуты.
     let budget = Duration::from_millis(timeout_ms);
+    // Отказ и молчание — разные вещи, и раньше оба назывались таймаутом.
+    // Немедленный отказ означает живой узел, который закрыл этот порт;
+    // молчание — что до узла не доходит. Для игрового сервера это два
+    // совершенно разных разговора с пользователем.
+    let mut refused = false;
     for addr in addr_iter {
         let left = budget.saturating_sub(started.elapsed());
         if left.is_zero() {
             break;
         }
-        if TcpStream::connect_timeout(&addr, left).is_ok() {
-            return ProbeResult {
-                ok: true,
-                ms: started.elapsed().as_millis() as u64,
-                reason: None,
-                code: FailureCode::Ok,
-            };
+        match TcpStream::connect_timeout(&addr, left) {
+            Ok(_) => {
+                return ProbeResult {
+                    ok: true,
+                    ms: started.elapsed().as_millis() as u64,
+                    reason: None,
+                    code: FailureCode::Ok,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => refused = true,
+            Err(_) => {}
         }
     }
+    let code = if refused { FailureCode::TcpRefused } else { FailureCode::Timeout };
     ProbeResult {
         ok: false,
         ms: started.elapsed().as_millis() as u64,
-        reason: Some("timeout".into()),
-        code: FailureCode::Timeout,
+        reason: Some(code.as_str().to_string()),
+        code,
     }
 }
 
@@ -662,6 +672,20 @@ mod unit_tests {
         let (v, why) = classify_path(false, FailureCode::Cutoff, None);
         assert_eq!(v, PathVerdict::Cutoff);
         assert!(why.contains("установленное соединение"), "{why}");
+    }
+
+    #[test]
+    fn отказ_порта_не_называется_таймаутом() {
+        // Порт, который заведомо никто не слушает на петле, отвечает
+        // отказом. Раньше это называлось таймаутом — то есть «до узла не
+        // доходит», хотя узел как раз ответил.
+        //
+        // Бюджет не жалеем: Windows сообщает об отказе не мгновенно, а
+        // примерно через две секунды — столько она переспрашивает SYN.
+        // Боевой вызов идёт с теми же четырьмя секундами (targets.rs).
+        let r = tcp_probe("127.0.0.1", 1, 4000);
+        assert!(!r.ok);
+        assert_eq!(r.code, FailureCode::TcpRefused, "{:?}", r.reason);
     }
 
     #[test]

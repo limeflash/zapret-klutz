@@ -560,6 +560,14 @@ pub struct ResponseResult {
 /// нейтральным именем на ТОТ ЖЕ адрес обязано завершаться. Не завершается —
 /// значит сервер не умеет 1.2 или мешает что-то ещё, и вывода мы не делаем.
 pub fn classify_response(target: u32, control: u32, repeats: u32) -> (RespVerdict, String) {
+    // Ноль повторов — ноль замеров. Без этой проверки (0, 0, 0) давало
+    // «чисто»: правило объявляло бы чистым то, чего не измеряло.
+    if repeats == 0 {
+        return (
+            RespVerdict::NotApplicable,
+            "рукопожатия не запускались — про ответное направление вывода нет".into(),
+        );
+    }
     // Контроль обязан завершиться ВСЕ разы, а не хоть раз: на одном успехе
     // из двух говорить «с нейтральным именем отвечает каждый раз» нельзя, а
     // вердикт «режут ответ» строится именно на этом утверждении.
@@ -596,7 +604,14 @@ pub fn classify_response(target: u32, control: u32, repeats: u32) -> (RespVerdic
 
 fn count_completed(ip: IpAddr, port: u16, sni: &str, repeats: u32, timeout: Duration) -> u32 {
     (0..repeats)
-        .filter(|_| handshake_probe(ip, port, sni, true, timeout).0.done)
+        // Именно сертификат И завершение, а не одно завершение. Проба
+        // существует ради вопроса «не режут ли сертификат», и отвечать на
+        // него по одному ServerHelloDone — значит не смотреть на то, что
+        // как раз и меряем.
+        .filter(|_| {
+            let seen = handshake_probe(ip, port, sni, true, timeout).0;
+            seen.certificate && seen.done
+        })
         .count() as u32
 }
 
@@ -948,6 +963,16 @@ mod unit_tests {
         assert_eq!(classify_tls13(false, false, true).0, Blocked);
         // Молчит на обе — дело не в версии.
         assert_eq!(classify_tls13(false, false, false).0, NotApplicable);
+    }
+
+    #[test]
+    fn без_повторов_ответное_направление_не_измерено() {
+        // Раньше (0, 0, 0) давало «чисто»: правило объявляло чистым то,
+        // чего не измеряло. Снаружи защищал вызывающий, но правило должно
+        // быть верным и само по себе.
+        let (v, why) = classify_response(0, 0, 0);
+        assert_eq!(v, RespVerdict::NotApplicable);
+        assert!(why.contains("не запускались"), "{why}");
     }
 
     #[test]
