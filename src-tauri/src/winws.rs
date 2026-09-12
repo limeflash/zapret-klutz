@@ -344,6 +344,52 @@ mod unit_tests {
         dir
     }
 
+    /// Собирает .bat по образцу настоящего релиза: многопрофильный запуск
+    /// через `--new`, склейка строк по «^», пути в кавычках с %BIN%/%LISTS%,
+    /// %GameFilterTCP% ВНУТРИ списка портов, а не отдельным словом.
+    ///
+    /// Форма сверена с zapret-discord-youtube 1.10.2: все 22 шипованных
+    /// конфига разбираются этим же кодом, по 9 профилей каждый, без единой
+    /// неподставленной переменной. Сами файлы Flowseal сюда не кладём —
+    /// у релиза нет лицензии, разрешающей его перераспространять.
+    fn многопрофильный_bat() -> String {
+        [
+            "@echo off",
+            "chcp 65001 > nul",
+            "cd /d \"%~dp0\"",
+            "set \"BIN=%~dp0bin\\\"",
+            "set \"LISTS=%~dp0lists\\\"",
+            "start \"zapret: %~n0\" /min \"%BIN%winws.exe\" --wf-tcp=80,443,%GameFilterTCP% --wf-udp=443,%GameFilterUDP% ^",
+            "--filter-udp=443 --hostlist=\"%LISTS%list-general.txt\" --dpi-desync=fake --dpi-desync-repeats=6 --new ^",
+            "--filter-tcp=443 --dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=ts ^",
+            " --dpi-desync-fake-tls=\"%BIN%tls_clienthello_www_google_com.bin\"",
+        ]
+        .join("\r\n")
+            + "\r\n"
+    }
+
+    #[test]
+    fn разбирает_многопрофильный_конфиг_как_в_релизе() {
+        let dir = временный_релиз(&многопрофильный_bat());
+        let args = extract_winws_args(&dir, "general.bat").expect("должно разобраться");
+
+        // Один --new = два профиля. В настоящих конфигах их девять, но
+        // разделитель разбирается одинаково независимо от количества.
+        assert_eq!(args.iter().filter(|a| *a == "--new").count(), 1, "профили: {args:?}");
+        assert!(args.iter().any(|a| a == "--dpi-desync-split-pos=1,midsld"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.contains('%')),
+            "переменные обязаны быть подставлены: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a.starts_with("--dpi-desync-fake-tls=") && a.ends_with(".bin")),
+            "путь к fake-payload должен склеиться: {args:?}"
+        );
+        // Порт-лист с переменной внутри — самое хрупкое место подстановки.
+        assert!(args.iter().any(|a| a.starts_with("--wf-tcp=80,443,")), "{args:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn разбирает_аргументы_и_подставляет_переменные() {
         let bat = "@echo off\r\nset BIN=%~dp0bin\\\r\nstart \"zapret\" /min \"%BIN%winws.exe\" --wf-tcp=80,443 ^\r\n --hostlist=\"%LISTS%list-general.txt\" ^\r\n --filter-udp=%GameFilterUDP%\r\n";

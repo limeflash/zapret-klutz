@@ -140,6 +140,10 @@
     cycleIpsetMode: noop,
     setAutoUpdate: noop,
 
+    getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
+    generateExtraStrategies: noop,
+    removeExtraStrategies: noop,
+
     updateIpsetList: noop,
     updateHostsFile: noop,
     checkUpdates: async () => ({

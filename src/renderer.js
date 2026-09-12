@@ -2541,6 +2541,56 @@ $('clearDiscordBtn').onclick = async () => {
     : 'Кэш уже пуст или Discord не найден.';
 };
 
+// ─────────── Дополнительные стратегии ───────────
+//
+// Варианты конфига из релиза с другими точками разреза. Файлы кладутся прямо
+// в папку релиза и дальше живут как обычные конфиги: попадают в список, в
+// прогон тестов и в рейтинг самолечения.
+
+let extraStrategiesCount = 0;
+
+async function loadExtraStrategies() {
+  const s = await window.zapret.getExtraStrategies();
+  extraStrategiesCount = s.count || 0;
+  const title = $('extraStrategiesTitle');
+  const desc = $('extraStrategiesDesc');
+  if (extraStrategiesCount > 0) {
+    title.textContent = 'Убрать дополнительные стратегии';
+    desc.textContent =
+      `Сейчас добавлено ${extraStrategiesCount} ${plural(extraStrategiesCount, 'вариант', 'варианта', 'вариантов')}. ` +
+      'Удалить их из папки релиза. Конфигов Flowseal это не касается.';
+  } else {
+    title.textContent = 'Добавить стратегии';
+    desc.textContent = s.template
+      ? `Восемь вариантов «${displayName(s.template)}» с другими точками разреза — когда штатные не пробивают.`
+      : 'Сначала загрузи релиз zapret.';
+  }
+}
+
+$('extraStrategiesBtn').onclick = async () => {
+  if (extraStrategiesCount > 0) {
+    const ok = await showConfirm(`Удалить ${extraStrategiesCount} добавленных вариантов из папки релиза?`);
+    if (!ok) return;
+    const res = await window.zapret.removeExtraStrategies();
+    maint.textContent = res.ok ? 'Дополнительные стратегии убраны.' : res.error || 'Не удалось убрать.';
+  } else {
+    const ok = await showConfirm(
+      'Добавить восемь вариантов в папку релиза?\n\n' +
+        'Точки разреза взяты из боевых наборов z2k. Работают они или нет — ' +
+        'покажет только прогон тестов: заранее это не проверить. ' +
+        'Убрать можно этой же кнопкой.'
+    );
+    if (!ok) return;
+    maint.textContent = 'Создаю варианты…';
+    const res = await window.zapret.generateExtraStrategies();
+    maint.textContent = res.ok
+      ? 'Готово. Прогони тесты, чтобы узнать, помогает ли что-то из них.'
+      : res.error || 'Не удалось создать.';
+  }
+  await loadExtraStrategies();
+  refreshState();
+};
+
 let lastDiagResults = null;
 
 function buildDiagReport(results) {
@@ -2765,6 +2815,7 @@ async function afterReleaseLoaded() {
   loadNotifySound();
   loadTgwsproxyStatus();
   loadReleaseList();
+  loadExtraStrategies();
   loadOverview();
   ensureTargetsLoaded();
 

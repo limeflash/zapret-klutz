@@ -84,6 +84,10 @@
     setGameFilter: (mode) => invoke('set_game_filter', { mode }),
     cycleIpsetMode: () => invoke('cycle_ipset_mode'),
     setAutoUpdate: (enabled) => invoke('set_auto_update', { enabled }),
+    getExtraStrategies: () => invoke('get_extra_strategies'),
+    generateExtraStrategies: (template) => invoke('generate_extra_strategies', { template: template || null }),
+    removeExtraStrategies: () => invoke('remove_extra_strategies'),
+
     updateIpsetList: () => invoke('update_ipset_list'),
     updateHostsFile: () => invoke('update_hosts_file'),
     checkUpdates: () => invoke('check_updates'),

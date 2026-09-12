@@ -1279,6 +1279,64 @@ pub fn save_custom_lists(state: State<AppState>, include: String, exclude: Strin
     }
 }
 
+// ─────────── Дополнительные стратегии ───────────
+
+#[derive(Debug, Serialize)]
+pub struct ExtraStrategies {
+    /// Сколько вариантов уже лежит в папке релиза.
+    count: usize,
+    /// Какой конфиг возьмём образцом, если пользователь не выберет сам.
+    template: Option<String>,
+}
+
+#[tauri::command(async)]
+pub fn get_extra_strategies(state: State<AppState>) -> ExtraStrategies {
+    let Some(root) = root_of(&state) else {
+        return ExtraStrategies { count: 0, template: None };
+    };
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    ExtraStrategies {
+        count: crate::strategies::count(&root),
+        template: crate::strategies::default_template(&root, active.as_deref()),
+    }
+}
+
+/// Создаёт варианты выбранного конфига с позициями разреза, которых в
+/// релизе Flowseal нет. Файлы появляются в папке релиза и дальше живут как
+/// обычные конфиги: попадают в список, в прогон тестов и в рейтинг.
+#[tauri::command(async)]
+pub fn generate_extra_strategies(state: State<AppState>, template: Option<String>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    let template = match template.filter(|t| !t.trim().is_empty()) {
+        Some(t) => t,
+        None => match crate::strategies::default_template(&root, active.as_deref()) {
+            Some(t) => t,
+            None => return err("В релизе нет конфигов, которые можно взять за образец."),
+        },
+    };
+    match crate::strategies::generate(&root, &template) {
+        Ok(made) => {
+            let _ = made;
+            ok()
+        }
+        Err(e) => err(e),
+    }
+}
+
+#[tauri::command(async)]
+pub fn remove_extra_strategies(state: State<AppState>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    match crate::strategies::remove_all(&root) {
+        Ok(_) => ok(),
+        Err(e) => err(e),
+    }
+}
+
 // ─────────── Экспорт / импорт настроек ───────────
 //
 // Намеренно узко: только то, что переносимо между машинами и релизами.
