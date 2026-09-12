@@ -1524,19 +1524,53 @@ pub struct GameScanState {
     /// игровые порты через обход не идут, и адреса там лежат впустую.
     #[serde(rename = "gameFilter")]
     game_filter: String,
+    /// Когда список последний раз менялся. `null` — списка ещё нет.
+    #[serde(rename = "changedAt")]
+    changed_at: Option<u64>,
 }
 
 #[tauri::command(async)]
 pub fn get_game_scan(state: State<AppState>) -> GameScanState {
     let Some(root) = root_of(&state) else {
-        return GameScanState { saved: 0, addrs: Vec::new(), game_filter: String::new() };
+        return GameScanState {
+            saved: 0,
+            addrs: Vec::new(),
+            game_filter: String::new(),
+            changed_at: None,
+        };
     };
     let addrs = crate::gamescan::saved_ips(&root);
     GameScanState {
         saved: addrs.len() as u32,
         addrs,
         game_filter: crate::toggles::current_game_filter(&root),
+        changed_at: crate::gamescan::changed_at(&root, crate::gamescan::Target::Bypass),
     }
+}
+
+/// Убирает из списка один адрес.
+///
+/// Сбор берёт адреса пачкой и иногда прихватывает чужое — облачный адрес,
+/// попутную службу. Чтобы вычистить одну строку, не должно требоваться
+/// сбрасывать весь список и играть ещё один матч.
+#[tauri::command(async)]
+pub fn remove_game_ip(app: AppHandle, state: State<AppState>, addr: String) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    match crate::gamescan::remove_from(&root, crate::gamescan::Target::Bypass, &[addr]) {
+        Ok(0) => return err("Такого адреса в списке нет."),
+        Err(e) => return err(e),
+        Ok(_) => {}
+    }
+    // Список читается при запуске winws, иначе удаление ничего не изменит.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    ok()
 }
 
 /// Кто сейчас похож на игру. Пусто — значит ничего не нашли, и это честный

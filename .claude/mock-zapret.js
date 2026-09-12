@@ -179,6 +179,7 @@
     }),
     clearGameIps: noop,
     excludeGameIps: noop,
+    removeGameIp: noop,
     getExtraStrategies: async () => ({ count: 0, template: 'general (ALT).bat' }),
     generateExtraStrategies: noop,
     removeExtraStrategies: noop,

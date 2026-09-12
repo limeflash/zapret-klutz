@@ -590,18 +590,25 @@ impl Target {
     }
 }
 
-/// Убирает перечисленные адреса из нашего блока в другом списке.
+/// Убирает перечисленные адреса из нашего блока. Возвращает, сколько убрал.
 ///
-/// Чужие строки не трогает: в этих файлах бывает и не наше.
-fn remove_from(root: &std::path::Path, target: Target, addrs: &[String]) -> Result<(), String> {
+/// Чужие строки не трогает: в этих файлах бывает и не наше. Сам адрес никуда
+/// не записывается — он только сверяется со строками блока, поэтому строка
+/// из интерфейса ничего сюда не протащит: не совпала — ничего не произошло.
+pub fn remove_from(
+    root: &std::path::Path,
+    target: Target,
+    addrs: &[String],
+) -> Result<usize, String> {
     let list = root.join("lists").join(target.file());
     let Ok(existing) = std::fs::read_to_string(&list) else {
-        return Ok(());
+        return Ok(0);
     };
     let mine = extract_block(&existing);
     let rest: Vec<String> = mine.iter().filter(|a| !addrs.contains(a)).cloned().collect();
-    if rest.len() == mine.len() {
-        return Ok(());
+    let убрано = mine.len() - rest.len();
+    if убрано == 0 {
+        return Ok(0);
     }
     // Пустой `ipset-all.txt` значит «применяться ко всему», поэтому там на
     // месте пустоты обязана остаться заглушка. Пустой список исключений
@@ -611,7 +618,19 @@ fn remove_from(root: &std::path::Path, target: Target, addrs: &[String]) -> Resu
     } else {
         merge_block(&existing, &rest)
     };
-    std::fs::write(&list, text).map_err(|e| e.to_string())
+    std::fs::write(&list, text).map_err(|e| e.to_string())?;
+    Ok(убрано)
+}
+
+/// Когда список последний раз менялся, в миллисекундах эпохи.
+///
+/// Берём время файла, а не храним свою отметку: список пишет и сбор, и
+/// удаление адреса. Поэтому это честно называется «последнее изменение», а
+/// не «собрано»: тот же файл может тронуть обновление списка IPSet.
+pub fn changed_at(root: &std::path::Path, target: Target) -> Option<u64> {
+    let m = std::fs::metadata(root.join("lists").join(target.file())).ok()?;
+    let t = m.modified().ok()?;
+    Some(t.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
 /// Кладёт собранные адреса в список релиза, не тронув чужие строки.
@@ -1335,6 +1354,37 @@ mod unit_tests {
         let cf = operator_of("104.29.153.1");
         println!("Cloudflare: {cf:?}");
         assert!(matches!(cf, Operator::Cloud { .. }), "облако должно опознаваться");
+    }
+
+    #[test]
+    fn лишний_адрес_убирается_поштучно() {
+        // Сбор берёт адреса пачкой и иногда прихватывает чужое. Сбрасывать
+        // весь список ради одной строки — значит играть ещё один матч.
+        let root = std::env::temp_dir().join(format!("klutz-one-{}", std::process::id()));
+        let lists = root.join("lists");
+        std::fs::create_dir_all(&lists).unwrap();
+        std::fs::write(lists.join("ipset-all.txt"), "").unwrap();
+
+        let nets = vec!["162.249.72.0/21".to_string(), "104.29.153.0/24".to_string()];
+        save_ips_to(&root, Target::Bypass, &nets).unwrap();
+
+        // Убираем ровно одну строку, соседняя остаётся.
+        let убрано = remove_from(&root, Target::Bypass, &["104.29.153.0/24".to_string()]).unwrap();
+        assert_eq!(убрано, 1);
+        assert_eq!(saved_ips_in(&root, Target::Bypass), vec!["162.249.72.0/21".to_string()]);
+
+        // Чего в списке нет, то и не убирается — и это не ошибка записи.
+        assert_eq!(remove_from(&root, Target::Bypass, &["8.8.8.0/24".to_string()]).unwrap(), 0);
+
+        // Последний адрес уходит — возвращается заглушка, иначе пустой
+        // ipset-all означал бы «применяться ко всему».
+        remove_from(&root, Target::Bypass, &["162.249.72.0/21".to_string()]).unwrap();
+        assert!(saved_ips_in(&root, Target::Bypass).is_empty());
+        let текст = std::fs::read_to_string(lists.join("ipset-all.txt")).unwrap();
+        assert!(текст.contains(EMPTY_STUB), "{текст:?}");
+
+        assert!(changed_at(&root, Target::Bypass).is_some(), "время файла читается");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
