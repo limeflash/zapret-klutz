@@ -144,7 +144,9 @@ impl<'a> TestRun<'a> {
     /// None — прогон уже идёт, начинать второй нельзя.
     pub fn acquire(state: &'a AppState) -> Option<Self> {
         let mut testing = state.testing.lock().unwrap();
-        if *testing {
+        // Сбор адресов игры перезапускает обход — прогон поверх него
+        // перетирал бы конфиг под сбором.
+        if *testing || crate::gamescan::scan_busy() {
             return None;
         }
         *testing = true;

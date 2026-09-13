@@ -388,7 +388,14 @@ pub fn run_tests(app: AppHandle, state: State<AppState>, mode: String) -> RunTes
     // здесь: два прогона одновременно перетирали бы конфиг друг другу.
     // Тот же замок берёт и автопрогон — см. state::TestRun.
     let Some(run) = crate::state::TestRun::acquire(&state) else {
-        return RunTestsResult { ok: false, error: Some("Тесты уже идут.".into()), text: String::new() };
+        // Замок занят либо другим прогоном, либо сбором адресов игры — и
+        // человеку важно знать, чего именно ждать.
+        let why = if crate::gamescan::scan_busy() {
+            "Сейчас идёт сбор адресов игры — дождись его окончания."
+        } else {
+            "Тесты уже идут."
+        };
+        return RunTestsResult { ok: false, error: Some(why.into()), text: String::new() };
     };
 
     // Скрипт сам поднимает и гасит winws под каждый конфиг, так что к концу
@@ -1670,6 +1677,7 @@ pub fn scan_game_traffic(
     seconds: Option<u64>,
 ) -> Result<crate::gamescan::ScanResult, String> {
     let root = root_of(&state).ok_or("Сначала загрузи релиз zapret.")?;
+    let _scan = crate::gamescan::ScanGuard::acquire(&state)?;
     let images: Vec<String> = images
         .into_iter()
         .map(|i| i.trim().to_string())
@@ -1727,6 +1735,7 @@ pub fn scan_game_from_log(
     seconds: Option<u64>,
 ) -> Result<crate::gamescan::ScanResult, String> {
     let root = root_of(&state).ok_or("Сначала загрузи релиз zapret.")?;
+    let _scan = crate::gamescan::ScanGuard::acquire(&state)?;
     let active = state
         .persisted
         .lock()

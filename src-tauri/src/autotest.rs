@@ -50,7 +50,7 @@ fn idle_seconds() -> u64 {
 /// Ничего своего сейчас не крутится и пользователь отошёл.
 fn is_clear(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
-    if *state.testing.lock().unwrap() {
+    if *state.testing.lock().unwrap() || crate::gamescan::scan_busy() {
         return false;
     }
     idle_seconds() >= IDLE_GATE_SEC

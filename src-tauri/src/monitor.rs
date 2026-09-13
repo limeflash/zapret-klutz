@@ -98,7 +98,7 @@ fn tick(app: &AppHandle) {
 
     // Во время прогона тестов стратегия меняется каждые несколько секунд —
     // мерить в этот момент бессмысленно и вредно.
-    if *state.testing.lock().unwrap() {
+    if *state.testing.lock().unwrap() || crate::gamescan::scan_busy() {
         return;
     }
     if !winws::is_winws_running() {
@@ -152,7 +152,7 @@ fn tick(app: &AppHandle) {
     // Проверка заняла секунды. За это время мог начаться прогон тестов —
     // он крутит стратегию каждые несколько секунд, и всё, что ниже, от
     // записи результатов до переключения, только мешало бы ему.
-    if *state.testing.lock().unwrap() {
+    if *state.testing.lock().unwrap() || crate::gamescan::scan_busy() {
         return;
     }
     let ok = results.iter().filter(|r| r.ok).count();

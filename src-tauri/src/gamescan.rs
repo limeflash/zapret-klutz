@@ -756,6 +756,9 @@ pub fn save_ips_to(
     // повторять его в итоге очередного скана незачем.
     let mut свежие_пропуски = Vec::new();
     for a in addrs {
+        if !адрес_или_сеть(a) {
+            continue;
+        }
         // Готовую сеть спрашивать не о чем: так приходит перенос из списка в
         // список, где адреса уже развёрнуты. Без этой проверки «Не трогать»
         // ходило в справочник по разу на каждую из 37 сетей — впустую.
@@ -920,6 +923,50 @@ fn поле(line: &str, name: &str) -> Option<u16> {
 /// Копилка адресов, пока идёт сбор из лога. `None` — сбор не идёт, и тогда
 /// строки лога через неё просто пролетают.
 pub static HARVEST: std::sync::Mutex<Option<BTreeSet<String>>> = std::sync::Mutex::new(None);
+
+/// Идёт сбор адресов игры. Сбор длится до пяти минут и перезапускает обход:
+/// самолечение, переключив в это время стратегию, было бы молча отменено
+/// самим сбором на выходе, а прогон тестов крутил бы конфиги прямо под ним.
+static SCAN_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn scan_busy() -> bool {
+    SCAN_BUSY.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Право на сбор. Снимается само — на раннем `return` и по ошибке тоже.
+pub struct ScanGuard(());
+
+impl ScanGuard {
+    pub fn acquire(state: &crate::state::AppState) -> Result<Self, String> {
+        if *state.testing.lock().unwrap() {
+            return Err("Сейчас идёт прогон тестов — дождись его окончания.".into());
+        }
+        SCAN_BUSY
+            .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+            .map_err(|_| "Сбор адресов уже идёт.".to_string())?;
+        Ok(ScanGuard(()))
+    }
+}
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        SCAN_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Строка годится в справочник и в список, только если это адрес или сеть.
+/// Наш блок в файле человек волен поправить руками, и оттуда строка ушла бы
+/// и в запрос к справочнику, и обратно в список, который читает winws.
+pub fn адрес_или_сеть(s: &str) -> bool {
+    match s.split_once('/') {
+        None => s.parse::<IpAddr>().is_ok(),
+        Some((ip, len)) => match (ip.parse::<IpAddr>(), len.parse::<u8>()) {
+            (Ok(IpAddr::V4(_)), Ok(l)) => l <= 32,
+            (Ok(IpAddr::V6(_)), Ok(l)) => l <= 128,
+            _ => false,
+        },
+    }
+}
 
 pub fn harvest_start() {
     *HARVEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(BTreeSet::new());
@@ -1267,6 +1314,30 @@ pub fn merge_block(existing: &str, addrs: &[String]) -> String {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn строка_из_списка_проверяется_до_справочника() {
+        for ok in ["162.249.72.1", "162.249.72.0/24", "2001:db8::1", "2001:db8::/32"] {
+            assert!(адрес_или_сеть(ok), "{ok} — нормальный адрес или сеть");
+        }
+        for bad in ["", "foo", "1.2.3.4&x=1", "1.2.3.0/33", "2001:db8::/129", "1.2.3.0/", "/24", "1.2.3.4 5.6.7.8"] {
+            assert!(!адрес_или_сеть(bad), "{bad:?} не должно уходить ни в справочник, ни в список");
+        }
+    }
+
+    #[test]
+    fn сбор_и_тесты_не_идут_одновременно() {
+        let state = crate::state::AppState::new();
+        let first = ScanGuard::acquire(&state).expect("первый сбор должен начаться");
+        assert!(scan_busy());
+        assert!(ScanGuard::acquire(&state).is_err(), "второй сбор поверх первого");
+        drop(first);
+        assert!(!scan_busy(), "признак снимается сам");
+
+        *state.testing.lock().unwrap() = true;
+        assert!(ScanGuard::acquire(&state).is_err(), "сбор во время прогона тестов");
+        assert!(!scan_busy(), "отказ не должен оставлять признак");
+    }
 
     #[test]
     fn разбор_строк_netstat_не_зависит_от_языка() {
