@@ -730,9 +730,25 @@ $('aboutGithubBtn').onclick = () => window.zapret.openExternalUrl(KLUTZ_REPO_URL
 $('aboutReportBtn').onclick = () => window.zapret.openExternalUrl(`${KLUTZ_REPO_URL}/issues`);
 // Сравнение версий по частям: 1.10 новее 1.9, «1.9.9c» новее «1.9.9».
 // Одного равенства мало — сборка новее опубликованной выглядела бы
-// «устаревшей».
+// «устаревшей». Хвост через дефис — пререлиз по semver: «1.4.0-beta.1»
+// СТАРШЕ 1.3.0, но младше 1.4.0, иначе бете не предложат выпуск.
 function cmpVer(a, b) {
-  const parts = (v) => String(v || '').trim().replace(/^v/i, '').toLowerCase().match(/\d+|[a-z]+/g) || [];
+  const split = (v) => {
+    const s = String(v || '').trim().replace(/^v/i, '').toLowerCase();
+    const i = s.indexOf('-');
+    return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)];
+  };
+  const [ca, pa] = split(a);
+  const [cb, pb] = split(b);
+  const core = cmpParts(ca, cb);
+  if (core || pa === pb) return core;
+  if (!pa) return 1;
+  if (!pb) return -1;
+  return cmpParts(pa, pb);
+}
+
+function cmpParts(a, b) {
+  const parts = (v) => v.match(/\d+|[a-z]+/g) || [];
   const pa = parts(a);
   const pb = parts(b);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
