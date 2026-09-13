@@ -11,6 +11,7 @@ mod autotest;
 mod commands;
 mod diag;
 mod favicon;
+mod gamescan;
 mod maintenance;
 mod monitor;
 mod notify;
@@ -170,6 +171,14 @@ pub fn run() {
             commands::check_component_updates,
             commands::check_klutz_update,
             commands::check_bypass_chance,
+            commands::get_game_scan,
+            commands::game_candidates,
+            commands::scan_game_traffic,
+            commands::scan_game_from_log,
+            commands::clear_game_ips,
+            commands::exclude_game_ips,
+            commands::remove_game_ips,
+            commands::identify_game_group,
             commands::get_extra_strategies,
             commands::generate_extra_strategies,
             commands::remove_extra_strategies,

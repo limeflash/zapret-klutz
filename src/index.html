@@ -208,6 +208,11 @@
         <span>Диагностика</span>
       </div>
 
+      <div class="nav-item" data-page="games" title="Игры">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M8.5 6C5.46243 6 3 8.46243 3 11.5V14.5C3 16.9853 5.01472 19 7.5 19C8.6 19 9.6 18.5 10.3 17.7L11 16.9C11.3 16.6 11.6 16.5 12 16.5C12.4 16.5 12.7 16.6 13 16.9L13.7 17.7C14.4 18.5 15.4 19 16.5 19C18.9853 19 21 16.9853 21 14.5V11.5C21 8.46243 18.5376 6 15.5 6H8.5ZM8 9.25C8.41421 9.25 8.75 9.58579 8.75 10V10.75H9.5C9.91421 10.75 10.25 11.0858 10.25 11.5C10.25 11.9142 9.91421 12.25 9.5 12.25H8.75V13C8.75 13.4142 8.41421 13.75 8 13.75C7.58579 13.75 7.25 13.4142 7.25 13V12.25H6.5C6.08579 12.25 5.75 11.9142 5.75 11.5C5.75 11.0858 6.08579 10.75 6.5 10.75H7.25V10C7.25 9.58579 7.58579 9.25 8 9.25ZM15.5 10.5C15.5 11.0523 15.0523 11.5 14.5 11.5C13.9477 11.5 13.5 11.0523 13.5 10.5C13.5 9.94772 13.9477 9.5 14.5 9.5C15.0523 9.5 15.5 9.94772 15.5 10.5ZM17.5 14.5C18.0523 14.5 18.5 14.0523 18.5 13.5C18.5 12.9477 18.0523 12.5 17.5 12.5C16.9477 12.5 16.5 12.9477 16.5 13.5C16.5 14.0523 16.9477 14.5 17.5 14.5Z" fill="currentColor"></path></svg>
+        <span>Игры</span>
+      </div>
+
       <div class="nav-item" data-page="telegram" title="Telegram">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20.7096 3.6545C20.7096 3.6545 22.6523 2.897 22.4904 4.73664C22.4364 5.49415 21.9508 8.1454 21.573 11.0131L20.2779 19.5079C20.2779 19.5079 20.17 20.7524 19.1987 20.9688C18.2273 21.1852 16.7704 20.2113 16.5005 19.9949C16.2847 19.8326 12.4534 17.3977 11.1043 16.2074C10.7265 15.8827 10.2948 15.2334 11.1582 14.4759L16.8243 9.06525C17.4719 8.41595 18.1194 6.90095 15.4213 8.7406L7.86655 13.8808C7.86655 13.8808 7.00315 14.4218 5.3843 13.9349L1.87671 12.8527C1.87671 12.8527 0.581605 12.0411 2.79408 11.2295C8.19035 8.68645 14.8277 6.0893 20.7096 3.6545Z" fill="currentColor"></path></svg>
         <span>Telegram</span>
@@ -643,6 +648,90 @@
       </section>
 
       <!-- ═══ Telegram ═══ -->
+      <section id="pageGames" class="page hidden">
+        <div class="page-head row">
+          <div>
+            <h1>Игры</h1>
+            <p>У игры в матче нет имени в трафике — клиент уже знает адрес сервера и шлёт на него пакеты. Резать там могут только адрес и порт, поэтому и обходится это не так, как сайты.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Адреса игровых серверов</span>
+              <span class="ch-sub" id="gameScanSub">не собраны</span>
+            </div>
+            <div class="ch-right">
+              <button class="btn ghost sm" id="gameScanDeepBtn" title="Адреса берутся из пакетов, которые видит сам обход — так виден и игровой UDP">Глубокий сбор</button>
+              <button class="btn sm" id="gameScanBtn">Собрать адреса</button>
+            </div>
+          </div>
+
+          <!-- Ничего не собрано -->
+          <div class="game-empty" id="gameEmpty">
+            <div class="game-empty-icon">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="10" cy="10" r="6.5"></circle><circle cx="10" cy="10" r="2.5"></circle><path d="M10 1.5v3M10 15.5v3M1.5 10h3M15.5 10h3"></path></svg>
+            </div>
+            <div class="game-empty-title">Пока пусто</div>
+            <p class="game-empty-text">Запусти игру, зайди в меню или начни матч и нажми «Собрать адреса». Полминуты Klutz смотрит, куда ходит процесс игры, и складывает найденное сюда.</p>
+            <p class="game-empty-text dim">Одного пойманного адреса хватает: Klutz узнаёт, чей он, и берёт все сети оператора разом — у Riot их 36, у Valve 45. Пересобирать перед каждой игрой не надо.</p>
+          </div>
+
+          <!-- Идёт сбор -->
+          <div class="game-scanning hidden" id="gameScanning">
+            <div class="game-live">
+              <span class="game-live-dot"></span>
+              <span class="game-live-label">Сбор</span>
+              <span class="game-live-proc" id="gameScanProc"></span>
+            </div>
+            <div class="game-count">
+              <span class="game-count-n" id="gameScanCount">0</span>
+              <span class="game-count-w" id="gameScanCountWord">адресов поймано</span>
+            </div>
+            <div class="game-progress">
+              <div class="game-progress-bar"><div class="game-progress-fill" id="gameScanFill"></div></div>
+              <span class="game-progress-t" id="gameScanTime"></span>
+            </div>
+            <p class="game-note">Играй, не закрывай игру. Адреса появляются, только когда она реально подключается — в матче их больше, чем в меню.</p>
+          </div>
+
+          <!-- Собранное, группами по операторам -->
+          <div class="hidden" id="gameGroups"></div>
+
+          <!-- Что в список не пошло -->
+          <div class="game-skip hidden" id="gameSkipped"></div>
+
+          <div class="game-foot hidden" id="gameFoot">
+            <span class="game-foot-text">Обход трогает только эти сети. Если игра работала и без него, а с ним лагает — перенеси их в исключения.</span>
+            <div class="game-foot-btns">
+              <button class="btn-link" id="gameScanClearBtn">Убрать всё</button>
+              <button class="btn ghost sm" id="gameScanSkipBtn" title="Перенести собранные адреса в список исключений: обход перестанет их трогать">Не трогать</button>
+            </div>
+          </div>
+
+          <div class="game-msg hidden" id="gameScanHint"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <div class="ch-left">
+              <span class="ch-title">Game Filter</span>
+              <span class="ch-sub">какие порты пускать через обход</span>
+            </div>
+            <div class="ch-right">
+              <div class="seg sm" id="gameFilterSeg2">
+                <div class="seg-btn" data-gf="off">выкл</div>
+                <div class="seg-btn" data-gf="tcp">TCP</div>
+                <div class="seg-btn" data-gf="udp">UDP</div>
+                <div class="seg-btn" data-gf="all">оба</div>
+              </div>
+            </div>
+          </div>
+          <div class="game-filter-body" id="gameFilterDesc2">Пускать ли через обход игровые порты (1024–65535).</div>
+        </div>
+      </section>
+
       <section id="pageTelegram" class="page hidden">
         <div class="page-head row">
           <div>

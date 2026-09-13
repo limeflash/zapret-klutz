@@ -129,6 +129,11 @@ fn push_log_lines(app: &AppHandle, state: &AppState, chunk: &str) {
     if lines.is_empty() {
         return;
     }
+    // Пока идёт сбор адресов игры, каждая строка проходит через копилку.
+    // Дешевле некуда: если сбор не идёт, копилка сразу возвращается.
+    for line in &lines {
+        crate::gamescan::harvest_line(line);
+    }
     {
         let mut buf = state.winws_log.lock().unwrap();
         for line in &lines {
@@ -147,8 +152,23 @@ fn push_log_lines(app: &AppHandle, state: &AppState, chunk: &str) {
 /// Electron version. Falls back to nothing (caller decides what "no live
 /// logs" means) when the args can't be extracted, matching the "returns
 /// null, caller falls back to the .bat" contract upstream.
+/// Был ли у последнего запуска живой лог. Глубокому сбору это знать
+/// обязательно: без лога он смотрит в пустоту и сообщал бы, что игра
+/// молчит, хотя молчим мы сами.
+static LAST_RUN_HAD_LOGS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn last_run_had_logs() -> bool {
+    LAST_RUN_HAD_LOGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
+    // Во время сбора адресов winws запускается с `--debug`: только тогда он
+    // печатает пакеты, которые видит, а вместе с ними адреса игрового UDP,
+    // которых в таблице сокетов нет. Флаг живёт ровно на время сбора — вывод
+    // с ним очень обильный, держать его постоянно незачем.
+    let debug = crate::gamescan::harvest_active();
 
     // Без пользовательских списков winws не стартует вовсе: в строке запуска
     // стоят --hostlist на файлы, которых в поставке нет (их создаёт
@@ -172,7 +192,15 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
     let winws_exe = root.join("bin").join("winws.exe");
     let live_logs = args.is_some() && winws_exe.exists();
 
-    if let Some(args) = args.filter(|_| winws_exe.exists()) {
+    if let Some(mut args) = args.filter(|_| winws_exe.exists()) {
+        if debug {
+            // Именно со значением. У winws это `--debug=0|1|syslog|@<файл>`,
+            // и голый флаг он не принимает — я передавал его без значения, и
+            // подробный режим не включался вовсе. Сбор при этом «работал»:
+            // разбирал обычный вывод и находил один-два адреса вместо
+            // десятков, из-за чего выглядел рабочим, но бесполезным.
+            args.push("--debug=1".into());
+        }
         *state.winws_intentional_stop.lock().unwrap() = false;
         #[allow(unused_mut)]
         let mut cmd = Command::new(&winws_exe);
@@ -224,6 +252,7 @@ pub fn spawn_winws(app: &AppHandle, root: &Path, file_name: &str) -> Result<bool
         watch_by_poll(app);
     }
 
+    LAST_RUN_HAD_LOGS.store(live_logs, std::sync::atomic::Ordering::Relaxed);
     Ok(live_logs)
 }
 

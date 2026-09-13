@@ -57,7 +57,15 @@ pub fn update_ipset(root: &Path) -> IpsetUpdate {
     }
     let applied = mode == "loaded";
     if applied {
-        if let Err(e) = fs::write(&list, &text) {
+        // Адреса игр, собранные сканированием, живут в этом же файле
+        // помеченным блоком. Скачанный список кладём вместо чужого, а свой
+        // блок переносим: иначе «Обновить список IPSet» молча стирал бы
+        // результат сканирования, и человек не понял бы, куда он делся.
+        let свои = fs::read_to_string(&list)
+            .map(|c| crate::gamescan::extract_block(&c))
+            .unwrap_or_default();
+        let merged = crate::gamescan::merge_block(&text, &свои);
+        if let Err(e) = fs::write(&list, &merged) {
             return IpsetUpdate { ok: false, error: Some(e.to_string()), mode, applied: false };
         }
     }

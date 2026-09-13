@@ -1532,6 +1532,347 @@ pub fn check_bypass_chance(state: State<AppState>) -> BypassChance {
     bypass_chance(&state)
 }
 
+// ─────────── Сканирование трафика игры ───────────
+
+#[derive(Debug, Serialize)]
+pub struct GameScanState {
+    /// Сколько адресов игр уже лежит в списке релиза.
+    saved: u32,
+    /// Сами адреса — раздел показывает их списком, чтобы человек видел, что
+    /// именно попало в обход, а не одно число.
+    addrs: Vec<String>,
+    /// Применяется ли этот список вообще: при выключенном Game Filter
+    /// игровые порты через обход не идут, и адреса там лежат впустую.
+    #[serde(rename = "gameFilter")]
+    game_filter: String,
+    /// Когда список последний раз менялся. `null` — списка ещё нет.
+    #[serde(rename = "changedAt")]
+    changed_at: Option<u64>,
+    /// Адреса, разложенные по операторам: чьи они и когда пойманы.
+    groups: Vec<crate::gamescan::Group>,
+    /// Что в список не пошло и почему.
+    skipped: Vec<crate::gamescan::Skipped>,
+}
+
+#[tauri::command(async)]
+pub fn get_game_scan(state: State<AppState>) -> GameScanState {
+    let Some(root) = root_of(&state) else {
+        return GameScanState {
+            saved: 0,
+            addrs: Vec::new(),
+            game_filter: String::new(),
+            changed_at: None,
+            groups: Vec::new(),
+            skipped: Vec::new(),
+        };
+    };
+    let addrs = crate::gamescan::saved_ips(&root);
+    let (groups, skipped) = crate::gamescan::parse_groups(
+        &std::fs::read_to_string(root.join("lists").join("ipset-all.txt")).unwrap_or_default(),
+    );
+    GameScanState {
+        saved: addrs.len() as u32,
+        addrs,
+        game_filter: crate::toggles::current_game_filter(&root),
+        changed_at: crate::gamescan::changed_at(&root, crate::gamescan::Target::Bypass),
+        groups,
+        skipped,
+    }
+}
+
+/// Выясняет, чей это набор сетей, и подписывает его оператором.
+///
+/// Нужно для списков, записанных прежней версией: там сети лежат без
+/// оператора, и страница честно показывает «оператор не сохранён».
+/// Заставлять ради этого играть ещё один матч незачем — хватает двух
+/// запросов: номер оператора по одной сети, затем его объявленные сети.
+///
+/// Сам список при этом не меняется: добавляются только подписи, поэтому
+/// перезапускать обход не надо.
+#[tauri::command(async)]
+pub fn identify_game_group(state: State<AppState>, nets: Vec<String>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    let Some(первая) = nets.first() else {
+        return err("Нечего определять.");
+    };
+    let (asn, объявлено) = match crate::gamescan::operator_of(первая) {
+        crate::gamescan::Operator::Nets { asn, nets } => (asn, nets),
+        crate::gamescan::Operator::Cloud { asn, prefixes } => {
+            return err(format!(
+                "Это облако AS{asn}, у него {prefixes} сетей. Игровым оператором оно не бывает."
+            ))
+        }
+        crate::gamescan::Operator::Unknown => {
+            return err("Справочник не ответил. Проверь связь и попробуй ещё раз.")
+        }
+    };
+    let (его, _чужие) = crate::gamescan::partition_by(&nets, &объявлено);
+    if его.is_empty() {
+        return err("Ни одна сеть из этих оператору не принадлежит.");
+    }
+    let name = crate::gamescan::holder_of(&asn);
+    match crate::gamescan::attribute(&root, &его, &asn, &name) {
+        Ok(()) => ok(),
+        Err(e) => err(e),
+    }
+}
+
+/// Убирает из списка перечисленные сети.
+///
+/// Сбор берёт адреса пачкой и иногда прихватывает чужое — облачный адрес,
+/// попутную службу. Чтобы вычистить одну строку, не должно требоваться
+/// сбрасывать весь список и играть ещё один матч.
+///
+/// Принимает именно пачку, а не один адрес: снять группу оператора — это
+/// три десятка сетей разом, и по одному вызову на каждую значило бы три
+/// десятка перезапусков обхода подряд.
+#[tauri::command(async)]
+pub fn remove_game_ips(app: AppHandle, state: State<AppState>, addrs: Vec<String>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    match crate::gamescan::remove_from(&root, crate::gamescan::Target::Bypass, &addrs) {
+        Ok(0) => return err("Этих адресов в списке нет."),
+        Err(e) => return err(e),
+        Ok(_) => {}
+    }
+    // Список читается при запуске winws, иначе удаление ничего не изменит.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    ok()
+}
+
+/// Кто сейчас похож на игру. Пусто — значит ничего не нашли, и это честный
+/// ответ: собрать адреса постороннего процесса хуже, чем не собрать ничего.
+#[tauri::command(async)]
+pub fn game_candidates() -> Vec<crate::gamescan::Candidate> {
+    let names = crate::gamescan::process_names();
+    crate::gamescan::candidates(&crate::gamescan::connections(), &names)
+}
+
+/// Сканирует, пока идёт указанное время, и сразу кладёт найденное в список.
+///
+/// Имена процессов приходят из интерфейса и в командную строку НЕ уезжают:
+/// они попадают в фильтр tasklist как один аргумент, который система
+/// передаёт процессу целиком. Но длину ограничиваем — иначе чужая строка на
+/// мегабайт просто съест память.
+#[tauri::command(async)]
+pub fn scan_game_traffic(
+    app: AppHandle,
+    state: State<AppState>,
+    images: Vec<String>,
+    seconds: Option<u64>,
+) -> Result<crate::gamescan::ScanResult, String> {
+    let root = root_of(&state).ok_or("Сначала загрузи релиз zapret.")?;
+    let images: Vec<String> = images
+        .into_iter()
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty() && i.len() <= 120)
+        .take(8)
+        .collect();
+    // Пусто — значит «найди сам»: спрашивать имя процесса у человека,
+    // который просто хочет, чтобы игра работала, — плохая мысль.
+    let secs = seconds.unwrap_or(30).clamp(5, 300);
+    // Полминуты без единого признака жизни — плохой опыт. Шлём, что нашли
+    // и у какого процесса, прямо по ходу.
+    let app2 = app.clone();
+    let mut r = crate::gamescan::scan(
+        &images,
+        std::time::Duration::from_secs(secs),
+        std::time::Duration::from_secs(2),
+        |proc, found| {
+            let _ = app2.emit("game-scan", serde_json::json!({ "proc": proc, "found": found }));
+        },
+    );
+    if r.addrs.is_empty() {
+        return Ok(r);
+    }
+    let пропущено = crate::gamescan::save_ips(&root, &r.addrs)?;
+    if !пропущено.is_empty() {
+        r.note.push_str(&облачные(&пропущено));
+    }
+
+    // Списки winws читает при запуске. Без перезапуска собранные адреса
+    // лежали бы в файле, ничего не меняя, — человек решил бы, что сбор не
+    // работает. Перезапускаем только то, что уже работало.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    Ok(r)
+}
+
+/// Глубокий сбор: адреса берутся из лога самого обхода.
+///
+/// Чем отличается от обычного. Обычный читает таблицу сокетов, а она
+/// показывает удалённый адрес только у соединённых. Игровой матч ходит через
+/// sendto, и напротив такого сокета стоит «*:*» — замерено: из 77 строк UDP
+/// адрес был у двух. Здесь же адреса даёт сам winws: он сидит на WinDivert и
+/// видит пакеты, а с `--debug` печатает каждый, который попал под `--wf-*`.
+///
+/// Цена — перезапуск обхода дважды: включить `--debug` и потом убрать.
+/// Держать его постоянно нельзя, вывод слишком обильный.
+#[tauri::command(async)]
+pub fn scan_game_from_log(
+    app: AppHandle,
+    state: State<AppState>,
+    seconds: Option<u64>,
+) -> Result<crate::gamescan::ScanResult, String> {
+    let root = root_of(&state).ok_or("Сначала загрузи релиз zapret.")?;
+    let active = state
+        .persisted
+        .lock()
+        .unwrap()
+        .active_config
+        .clone()
+        .ok_or("Сначала включи обход — собирать не из чего.")?;
+    if !crate::winws::is_winws_running() {
+        return Err("Обход выключен. Включи его, запусти игру и повтори.".into());
+    }
+
+    let secs = seconds.unwrap_or(30).clamp(5, 300);
+    crate::gamescan::harvest_start();
+    // Перезапуск с --debug. Если он не удался, копилку обязательно снимаем:
+    // иначе следующий штатный запуск тоже уехал бы в отладочный режим.
+    if let Err(e) = crate::monitor::apply_config(&app, &active) {
+        let _ = crate::gamescan::harvest_stop();
+        return Err(format!("Не удалось перезапустить обход: {e}"));
+    }
+    // Живой лог есть не всегда. Когда аргументы из .bat разобрать не вышло,
+    // обход поднимается через cmd, а вывод уходит в никуда — и собирать
+    // тогда нечего в принципе. Раньше этот случай молчал: сбор честно ждал
+    // полминуты и сообщал, что игра ничего не отправляла, хотя мы просто
+    // никуда не смотрели.
+    if !crate::winws::last_run_had_logs() {
+        let _ = crate::gamescan::harvest_stop();
+        let _ = crate::monitor::apply_config(&app, &active);
+        return Err("Этот конфиг запускается через .bat, и его вывод нам недоступен — \
+                    глубокий сбор на нём работать не может. Попробуй обычный сбор."
+            .into());
+    }
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(secs) {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let _ = app.emit(
+            "game-scan",
+            serde_json::json!({ "proc": "обход", "found": crate::gamescan::harvest_len() }),
+        );
+    }
+
+    let addrs = crate::gamescan::harvest_stop();
+    // Снимаем --debug тем же путём: копилка уже выключена, значит запуск
+    // будет обычным.
+    let _ = crate::monitor::apply_config(&app, &active);
+
+    let mut note = if addrs.is_empty() {
+        "обход за это время не увидел ни одного подходящего адреса. Причин может быть \
+         несколько: игра молчала; Game Filter выключен или стоит не на том протоколе \
+         (матч обычно ходит по UDP); нужные порты не попали в фильтр конфига; winws \
+         упал. Начни с Game Filter в режиме «оба»"
+            .to_string()
+    } else {
+        format!(
+            "поймано адресов: {}. Взяты из пакетов, которые видел сам обход, — сюда \
+             попадает и игровой UDP, невидимый в таблице соединений. В список идёт не \
+             сам адрес: Klutz выясняет, чей он, и кладёт все сети этого оператора. \
+             Матч подключается к одному серверу из пула, и одного пойманного хватает, \
+             чтобы накрыть остальные",
+            addrs.len()
+        )
+    };
+    // Перезапуск здесь один. Раньше их было два подряд: один чтобы снять
+    // --debug, второй после записи адресов. Первый успевал поднять обход со
+    // старым списком, и он же лишний раз рвал связь.
+    if !addrs.is_empty() {
+        let пропущено = crate::gamescan::save_ips(&root, &addrs)?;
+        if !пропущено.is_empty() {
+            note.push_str(&облачные(&пропущено));
+        }
+    }
+    Ok(crate::gamescan::ScanResult {
+        // Именно проверка, а не «раз дошли сюда, значит работает»: winws мог
+        // упасть за эти полминуты, и заявлять обратное мы не вправе.
+        running: crate::winws::is_winws_running(),
+        addrs,
+        tcp_ports: Vec::new(),
+        udp_ports: Vec::new(),
+        ticks: secs as u32,
+        note,
+    })
+}
+
+/// Переносит собранные адреса из «обходить» в «не трогать».
+///
+/// Нужно, когда игра работает, а обход ей мешает. На живом Valorant так и
+/// вышло: серверы Riot попали в ipset-all, игровой профиль применил к ним
+/// `fake` с двенадцатью повторами, и игра показала высокий пинг с ошибкой
+/// сети. Адреса при этом собраны правильно — просто применять их надо в
+/// другую сторону.
+/// Приписка о том, что в список не пошло.
+///
+/// Пропуск без объяснения хуже, чем его отсутствие: человек видит «собрано
+/// 36», а поймано было 37, и разницу объяснить нечем.
+fn облачные(skipped: &[String]) -> String {
+    format!(
+        " Не взял: {}. Это облачные адреса — за ними стоит пол-интернета, а не игра, и обход ушёл бы далеко за её пределы.",
+        skipped.join("; ")
+    )
+}
+
+#[tauri::command(async)]
+pub fn exclude_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    let addrs = crate::gamescan::saved_ips_in(&root, crate::gamescan::Target::Bypass);
+    if addrs.is_empty() {
+        return err("Собранных адресов нет — переносить нечего.");
+    }
+    // Отдельная очистка списка обхода здесь больше не нужна: запись в один
+    // список сама убирает эти адреса из другого. Раньше очисток было две —
+    // и ровно то, что они делали порознь, разъезжалось при следующем сборе.
+    if let Err(e) = crate::gamescan::save_ips_to(&root, crate::gamescan::Target::Skip, &addrs) {
+        return err(e);
+    }
+    // Списки читаются при запуске, иначе перенос ничего не изменит.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    ok()
+}
+
+#[tauri::command(async)]
+pub fn clear_game_ips(app: AppHandle, state: State<AppState>) -> SimpleResult {
+    let Some(root) = root_of(&state) else {
+        return err("Сначала загрузи релиз zapret.");
+    };
+    if let Err(e) = crate::gamescan::clear_ips(&root) {
+        return err(e);
+    }
+    // Без перезапуска winws продолжает работать со СТАРЫМ списком: файл
+    // очищен, а в памяти адреса остались. Человек жмёт «Убрать», видит
+    // пустой список и не понимает, почему ничего не изменилось.
+    let active = state.persisted.lock().unwrap().active_config.clone();
+    if let Some(name) = active {
+        if crate::winws::is_winws_running() {
+            let _ = crate::monitor::apply_config(&app, &name);
+        }
+    }
+    ok()
+}
+
 // ─────────── Дополнительные стратегии ───────────
 
 #[derive(Debug, Serialize)]

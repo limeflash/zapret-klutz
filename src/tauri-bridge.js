@@ -89,6 +89,18 @@
     cycleIpsetMode: () => invoke('cycle_ipset_mode'),
     setAutoUpdate: (enabled) => invoke('set_auto_update', { enabled }),
     checkBypassChance: () => invoke('check_bypass_chance'),
+    getGameScan: () => invoke('get_game_scan'),
+    gameCandidates: () => invoke('game_candidates'),
+    onGameScan: (cb) => {
+      const un = listen('game-scan', (e) => cb(e.payload));
+      return () => un.then((f) => f());
+    },
+    scanGameTraffic: (images, seconds) => invoke('scan_game_traffic', { images, seconds: seconds || null }),
+    scanGameFromLog: (seconds) => invoke('scan_game_from_log', { seconds: seconds || null }),
+    clearGameIps: () => invoke('clear_game_ips'),
+    excludeGameIps: () => invoke('exclude_game_ips'),
+    removeGameIps: (addrs) => invoke('remove_game_ips', { addrs }),
+    identifyGameGroup: (nets) => invoke('identify_game_group', { nets }),
     getExtraStrategies: () => invoke('get_extra_strategies'),
     generateExtraStrategies: (template) => invoke('generate_extra_strategies', { template: template || null }),
     removeExtraStrategies: () => invoke('remove_extra_strategies'),

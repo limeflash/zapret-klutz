@@ -205,6 +205,7 @@ function switchPage(name) {
     ensureTargetsLoaded();
     loadGameTargetsArea();
   }
+  if (name === 'games') loadGames();
   if (name === 'telegram') {
     loadTgwsproxyStatus();
     loadTgwsproxyAutostart();
@@ -265,6 +266,7 @@ function render() {
   $('pageHome').classList.toggle('hidden', !hasRelease || activePage !== 'home');
   $('pageStrategies').classList.toggle('hidden', !hasRelease || activePage !== 'strategies');
   $('pageDiagnostics').classList.toggle('hidden', !hasRelease || activePage !== 'diagnostics');
+  $('pageGames').classList.toggle('hidden', !hasRelease || activePage !== 'games');
   $('pageTelegram').classList.toggle('hidden', !shellUnlocked || activePage !== 'telegram');
   $('pageSettings').classList.toggle('hidden', !hasRelease || activePage !== 'settings');
 
@@ -2581,8 +2583,8 @@ const gameFilterSeg = $('gameFilterSeg');
 // пересобирает пакеты, а игровой UDP этого не прощает — в CS2 это видно
 // как рывки и телепорты, у Valorant как ошибка подключения. В наборах
 // zapret2 игровой UDP Riot и Valorant поэтому прямо помечен «не трогать».
-function renderGameFilterNote(mode) {
-    const d = $('gameFilterDesc');
+function renderGameFilterNote(mode, el) {
+    const d = el || $('gameFilterDesc');
     if (!d) return;
     if (mode === 'udp' || mode === 'all') {
         d.innerHTML =
@@ -2745,6 +2747,361 @@ $('clearDiscordBtn').onclick = async () => {
     ? `Очищено: ${res.cleared.join(', ')}`
     : 'Кэш уже пуст или Discord не найден.';
 };
+
+// ─────────── Игры ───────────
+//
+// Адреса игровых серверов нигде не опубликованы и меняются от региона к
+// региону. Единственный способ их узнать — посмотреть, куда ходит сам
+// процесс игры. В сообществе это делают руками через TCPView; здесь то же
+// самое, только само и сразу в список, по которому работает Game Filter.
+//
+// Имя процесса не спрашиваем: человек, который хочет просто поиграть, не
+// обязан знать, как называется исполняемый файл.
+
+let gameScanBusy = false;
+
+// Какие группы развёрнуты и в каких показаны все сети. Живёт до
+// перезагрузки окна: это состояние просмотра, а не данные.
+const gameOpen = new Set();
+const gameAll = new Set();
+const СЕТЕЙ_СРАЗУ = 9;
+let gameState = null;
+
+const X_SVG =
+    '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"></path></svg>';
+
+// Сообщение под карточкой. Пусто — строки не видно вовсе.
+function gameMsg(text) {
+    const el = $('gameScanHint');
+    el.textContent = text || '';
+    el.classList.toggle('hidden', !text);
+}
+
+function gameWhen(ms) {
+    if (!ms) return '';
+    const d = new Date(ms);
+    const t = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    return d.toDateString() === new Date().toDateString()
+        ? `сегодня в ${t}`
+        : `${d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' })} в ${t}`;
+}
+
+function gameGroupKey(g, i) {
+    return g.asn || `нет-${i}`;
+}
+
+function renderGameGroups(groups) {
+    return groups
+        .map((g, i) => {
+            const key = gameGroupKey(g, i);
+            const open = gameOpen.has(key);
+            const nets = gameAll.has(key) ? g.nets : g.nets.slice(0, СЕТЕЙ_СРАЗУ);
+            const имя =
+                g.name ||
+                (g.asn ? `AS${g.asn}` : g.legacy ? 'Оператор не сохранён' : 'Оператор не определён');
+            const счёт = `${g.nets.length} ${plural(g.nets.length, 'сеть', 'сети', 'сетей')}`;
+            // Про «развёрнуты из одного адреса» говорим только там, где это
+            // правда: у безымянной группы оператора нет, есть сеть вокруг
+            // самого адреса.
+            // Три разных случая, и путать их нельзя: у старых списков
+            // оператора не спрашивали вовсе, и говорить про сеть вокруг
+            // адреса там неправда — это объявленные сети оператора.
+            const откуда = g.asn
+                ? ' · развёрнуты из одного пойманного адреса'
+                : g.legacy
+                  ? ' · из списка прежней версии'
+                  : ' · сеть вокруг пойманного адреса';
+            const строки = open
+                ? nets
+                      .map(
+                          (n) =>
+                              `<div class="game-net"><span class="game-net-addr">${esc(n)}</span>` +
+                              `<button class="addr-remove-btn" data-net="${esc(n)}" title="Убрать эту сеть">${X_SVG}</button></div>`
+                      )
+                      .join('')
+                : '';
+            const ещё =
+                open && !gameAll.has(key) && g.nets.length > СЕТЕЙ_СРАЗУ
+                    ? `<button class="game-more" data-all="${esc(key)}">Показать все ${g.nets.length} ${plural(g.nets.length, 'сеть', 'сети', 'сетей')}</button>`
+                    : '';
+            return (
+                `<div class="game-group${open ? ' open' : ''}" data-group="${esc(key)}">` +
+                '<div class="game-group-left">' +
+                '<svg class="game-group-chev" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"></path></svg>' +
+                `<span class="game-group-name">${esc(имя)}</span>` +
+                (g.asn ? `<span class="game-asn">AS${esc(g.asn)}</span>` : '') +
+                `<span class="game-group-meta">${счёт}${откуда}</span>` +
+                '</div>' +
+                '<div class="game-group-right">' +
+                (g.legacy
+                    ? `<button class="btn-link" data-identify="${esc(key)}">Определить</button>`
+                    : '') +
+                `<span class="game-when">${esc(gameWhen(g.at))}</span>` +
+                `<button class="addr-remove-btn" data-group-remove="${esc(key)}" title="Убрать все сети этого оператора">${X_SVG}</button>` +
+                '</div></div>' +
+                строки +
+                ещё
+            );
+        })
+        .join('');
+}
+
+function renderGameSkipped(skipped) {
+    const el = $('gameSkipped');
+    el.classList.toggle('hidden', !skipped.length);
+    if (!skipped.length) return;
+    const s = skipped[0];
+    const кто = s.name || `AS${s.asn}`;
+    const хвост = skipped.length > 1 ? ` И ещё ${skipped.length - 1}.` : '';
+    el.innerHTML =
+        '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;color:var(--tx-6)"><path d="M5 12.5h7a2.5 2.5 0 0 0 .4-4.97A4 4 0 0 0 4.7 8.3 2.1 2.1 0 0 0 5 12.5z"></path></svg>' +
+        `<span class="game-skip-text">Пропущен адрес <span class="game-skip-addr">${esc(s.addr)}</span> — облако ${esc(кто)}, у него ${s.prefixes} ${plural(s.prefixes, 'сеть', 'сети', 'сетей')}. Не игра, в список не идёт.${хвост}</span>`;
+}
+
+async function loadGames() {
+    const s = await window.zapret.getGameScan();
+    gameState = s;
+    renderGameFilterNote(s.gameFilter, $('gameFilterDesc2'));
+    $('gameFilterSeg2')
+        .querySelectorAll('.seg-btn')
+        .forEach((b) => b.classList.toggle('active', b.dataset.gf === s.gameFilter));
+
+    if (gameScanBusy) return;
+    const addrs = s.addrs || [];
+    const groups = s.groups || [];
+    const есть = addrs.length > 0;
+
+    $('gameScanSub').textContent = есть
+        ? `${addrs.length} ${plural(addrs.length, 'сеть', 'сети', 'сетей')}` +
+          (s.changedAt ? ` · ${gameWhen(s.changedAt)}` : '')
+        : 'не собраны';
+
+    $('gameEmpty').classList.toggle('hidden', есть);
+    $('gameScanning').classList.add('hidden');
+    $('gameFoot').classList.toggle('hidden', !есть);
+
+    const box = $('gameGroups');
+    box.classList.toggle('hidden', !есть);
+    box.innerHTML = есть ? renderGameGroups(groups) : '';
+
+    renderGameSkipped(s.skipped || []);
+
+    // Собранное без включённого фильтра лежит без дела — об этом надо
+    // сказать, иначе человек ждёт эффекта, которого не будет.
+    gameMsg(
+        есть && (!s.gameFilter || s.gameFilter === 'off')
+            ? 'Адреса собраны, но Game Filter выключен — до игровых портов обход не доходит, и список лежит без дела.'
+            : ''
+    );
+}
+
+// Клик по группе разворачивает её; крестики убирают сеть или всю группу.
+$('gameGroups').onclick = async (e) => {
+    const netBtn = e.target.closest('[data-net]');
+    if (netBtn) {
+        e.stopPropagation();
+        const res = await window.zapret.removeGameIps([netBtn.dataset.net]);
+        await loadGames();
+        if (!res.ok) gameMsg(res.error || 'Не удалось убрать.');
+        return;
+    }
+    const grpBtn = e.target.closest('[data-group-remove]');
+    if (grpBtn) {
+        e.stopPropagation();
+        const key = grpBtn.dataset.groupRemove;
+        const g = (gameState?.groups || []).find((x, i) => gameGroupKey(x, i) === key);
+        if (!g) return;
+        const имя = g.name || (g.asn ? `AS${g.asn}` : 'этого оператора');
+        const сколько = `${g.nets.length} ${plural(g.nets.length, 'сеть', 'сети', 'сетей')}`;
+        if (!(await showConfirm(`Убрать все сети «${имя}» — ${сколько}?`))) return;
+        const res = await window.zapret.removeGameIps(g.nets);
+        await loadGames();
+        if (!res.ok) gameMsg(res.error || 'Не удалось убрать.');
+        return;
+    }
+    const ident = e.target.closest('[data-identify]');
+    if (ident) {
+        e.stopPropagation();
+        const g = (gameState?.groups || []).find((x, i) => gameGroupKey(x, i) === ident.dataset.identify);
+        if (!g) return;
+        ident.disabled = true;
+        ident.textContent = 'Спрашиваю…';
+        const res = await window.zapret.identifyGameGroup(g.nets);
+        await loadGames();
+        if (!res.ok) gameMsg(res.error || 'Не удалось определить оператора.');
+        return;
+    }
+    const more = e.target.closest('[data-all]');
+    if (more) {
+        gameAll.add(more.dataset.all);
+        $('gameGroups').innerHTML = renderGameGroups(gameState?.groups || []);
+        return;
+    }
+    const grp = e.target.closest('[data-group]');
+    if (grp) {
+        const key = grp.dataset.group;
+        if (gameOpen.has(key)) gameOpen.delete(key);
+        else gameOpen.add(key);
+        $('gameGroups').innerHTML = renderGameGroups(gameState?.groups || []);
+    }
+};
+
+// Живой сбор: секундомер и счётчик пойманного вместо немого ожидания.
+function startScanUI(secs) {
+    gameScanBusy = true;
+    $('gameEmpty').classList.add('hidden');
+    $('gameGroups').classList.add('hidden');
+    $('gameFoot').classList.add('hidden');
+    $('gameSkipped').classList.add('hidden');
+    $('gameScanning').classList.remove('hidden');
+    $('gameScanProc').textContent = '';
+    $('gameScanCount').textContent = '0';
+    $('gameScanFill').style.width = '0%';
+    gameMsg('');
+    $('gameScanBtn').disabled = true;
+    $('gameScanDeepBtn').disabled = true;
+
+    const начало = Date.now();
+    const tick = () => {
+        const прошло = Math.min(secs, Math.round((Date.now() - начало) / 1000));
+        $('gameScanFill').style.width = `${Math.round((прошло / secs) * 100)}%`;
+        $('gameScanTime').textContent = `${прошло} с из ${secs}`;
+    };
+    tick();
+    const таймер = setInterval(tick, 1000);
+    return () => {
+        clearInterval(таймер);
+        gameScanBusy = false;
+        $('gameScanning').classList.add('hidden');
+        $('gameScanBtn').disabled = false;
+        $('gameScanDeepBtn').disabled = false;
+    };
+}
+
+function gameScanTick(p) {
+    if (!gameScanBusy) return;
+    if (p.proc) $('gameScanProc').textContent = p.proc;
+    $('gameScanCount').textContent = String(p.found);
+    $('gameScanCountWord').textContent = plural(
+        p.found,
+        'адрес пойман',
+        'адреса поймано',
+        'адресов поймано'
+    );
+}
+
+$('gameScanDeepBtn').onclick = async () => {
+    const ok = await showConfirm(
+        'Глубокий сбор берёт адреса из пакетов, которые видит сам обход. Так виден и ' +
+            'игровой UDP — тот, которого нет в таблице соединений, а это как раз трафик ' +
+            'матча.\n\n' +
+            'Обход при этом дважды перезапустится: включить подробный режим и убрать его. ' +
+            'Связь на секунду прервётся. Игра должна работать всё это время.\n\n' +
+            'Game Filter должен быть включён, иначе игровые порты идут мимо обхода и ' +
+            'собирать будет нечего.'
+    );
+    if (!ok) return;
+
+    const stopUI = startScanUI(30);
+    $('gameScanSub').textContent = 'слушаю обход…';
+    $('gameScanProc').textContent = 'обход';
+    const stopProgress = window.zapret.onGameScan(gameScanTick);
+    let note = '';
+    try {
+        const r = await window.zapret.scanGameFromLog(30);
+        note = r.note;
+    } catch (e) {
+        note = typeof e === 'string' ? e : 'Не удалось собрать.';
+    }
+    stopProgress();
+    stopUI();
+    await loadGames();
+    gameMsg(note);
+};
+
+// Та же собранная пачка адресов, но в другую сторону: обход их не трогает.
+// Нужно, когда игра работает, а обход ей мешает — на Valorant так и вышло.
+$('gameScanSkipBtn').onclick = async () => {
+    const ok = await showConfirm(
+        'Перенести собранные адреса в список исключений?\n\n' +
+            'Обход перестанет трогать этот трафик. Так делают для игр, которые и без ' +
+            'обхода работают: в матче нет имени, прятать нечего, а лишние пакеты игра ' +
+            'воспринимает как потери — отсюда высокий пинг и обрывы.'
+    );
+    if (!ok) return;
+    const res = await window.zapret.excludeGameIps();
+    gameOpen.clear();
+    gameAll.clear();
+    await loadGames();
+    gameMsg(
+        res.ok
+            ? 'Адреса перенесены в исключения — обход их больше не трогает.'
+            : res.error || 'Не удалось перенести.'
+    );
+};
+
+$('gameScanClearBtn').onclick = async () => {
+    const было = (await window.zapret.getGameScan()).saved;
+    if (!(await showConfirm(`Убрать все собранные сети (${было})?`))) return;
+    const res = await window.zapret.clearGameIps();
+    gameOpen.clear();
+    gameAll.clear();
+    await loadGames();
+    gameMsg(res.ok ? 'Адреса игр убраны.' : res.error || 'Не удалось убрать.');
+};
+
+$('gameScanBtn').onclick = async () => {
+    // Кого именно сканировать — показываем ДО, а не ставим перед фактом.
+    // Ошибиться тут дорого: адреса постороннего процесса уедут в обход.
+    const cands = await window.zapret.gameCandidates();
+    if (!cands.length) {
+        gameMsg(
+            'Не вижу ни одного процесса, похожего на игру. Запусти игру, зайди в меню ' +
+                'или начни матч — адреса появляются, когда она реально подключается.'
+        );
+        return;
+    }
+    const top = cands[0];
+    const остальные = cands.slice(1, 4).map((c) => c.name).join(', ');
+    const ok = await showConfirm(
+        `Нашёл: ${top.name} — ${top.addrs} ${plural(top.addrs, 'адрес', 'адреса', 'адресов')} ` +
+            `на портах ${top.ports.slice(0, 6).join(', ')}.\n\n` +
+            (остальные ? `Похожи также: ${остальные}.\n\n` : '') +
+            'Сканирование займёт полминуты, и всё это время игра должна работать: ' +
+            'зайди в меню, начни матч. Адреса появляются только тогда, когда игра ' +
+            'реально подключается — до серверов, которые режут, она не дотянется. ' +
+            'Поэтому сканировать лучше при уже работающем обходе.'
+    );
+    if (!ok) return;
+
+    const stopUI = startScanUI(30);
+    $('gameScanSub').textContent = 'смотрю…';
+    $('gameScanProc').textContent = top.name;
+    const stopProgress = window.zapret.onGameScan(gameScanTick);
+    let note = '';
+    try {
+        const r = await window.zapret.scanGameTraffic([], 30);
+        const ports = [];
+        if (r.tcpPorts && r.tcpPorts.length) ports.push('TCP ' + r.tcpPorts.join(', '));
+        if (r.udpPorts && r.udpPorts.length) ports.push('UDP ' + r.udpPorts.join(', '));
+        note = r.note + (ports.length ? ` Порты: ${ports.join('; ')}.` : '');
+    } catch (e) {
+        note = typeof e === 'string' ? e : 'Не удалось отсканировать.';
+    }
+    stopProgress();
+    stopUI();
+    await loadGames();
+    gameMsg(note);
+};
+
+$('gameFilterSeg2').querySelectorAll('.seg-btn').forEach((b) => {
+    b.onclick = async () => {
+        const res = await window.zapret.setGameFilter(b.dataset.gf);
+        if (!res.ok) $('gameScanHint').textContent = res.error || 'Не удалось переключить.';
+        await loadGames();
+        loadToggles();
+    };
+});
 
 // ─────────── Дополнительные стратегии ───────────
 //
